@@ -83,17 +83,18 @@ async def preview_threshold(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_vectorize(contents: bytes, format: str, threshold: int, inv: bool, mode: str, num_colors: int):
+def _sync_vectorize(contents: bytes, format: str, threshold: int, inv: bool, mode: str, num_colors: int, filename: str = "vectorized", title: str = None, creator: str = "peripirdaus", opttolerance: float = 0.1, alphamax: float = 1.0):
+    eps_title = title or f"{sanitize_filename(filename)}.{format.lower()}"
     if mode == "color":
         _, (width, height), color_masks = process_color_image(contents, num_colors=num_colors)
         if not color_masks:
             return None
-        return vectorize_color(color_masks, width, height, fmt=format)
+        return vectorize_color(color_masks, width, height, fmt=format, title=eps_title, creator=creator, opttolerance=opttolerance, alphamax=alphamax)
     else:
         thresh_img, (width, height) = process_image(contents, threshold_val=threshold, invert=inv)
         if thresh_img is None:
             return None
-        return vectorize(thresh_img, width, height, fmt=format)
+        return vectorize(thresh_img, width, height, fmt=format, title=eps_title, creator=creator, opttolerance=opttolerance, alphamax=alphamax)
 
 
 @app.post("/api/vectorize")
@@ -103,12 +104,17 @@ async def vectorize_image_endpoint(
     threshold: int = Form(127),
     invert: str = Form("false"),
     mode: str = Form("monochrome"),
-    numColors: int = Form(4)
+    numColors: int = Form(4),
+    creator: str = Form("peripirdaus"),
+    opttolerance: float = Form(0.1),
+    alphamax: float = Form(1.0)
 ):
     try:
         inv = str_to_bool(invert)
         contents = await file.read()
-        vec_data = await asyncio.to_thread(_sync_vectorize, contents, format, threshold, inv, mode, numColors)
+        vec_data = await asyncio.to_thread(
+            _sync_vectorize, contents, format, threshold, inv, mode, numColors, file.filename, None, creator, opttolerance, alphamax
+        )
         
         if vec_data is None:
             raise HTTPException(status_code=400, detail="Tidak ada ikon terdeteksi.")
@@ -197,20 +203,23 @@ async def bulk_vectorize_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_freepik_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int):
+def _sync_freepik_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, creator: str = "peripirdaus"):
     base_suffix = int(time.time() % 10000)
     
     def _proc_item(args):
         i, (orig_filename, contents) = args
+        safe_name = sanitize_filename(orig_filename)
+        eps_title = f"{safe_name}.eps"
         eps_data, jpg_data = vectorize_freepik(
             contents,
             threshold_val=threshold,
             invert=inv,
             mode=mode,
-            num_colors=num_colors
+            num_colors=num_colors,
+            title=eps_title,
+            creator=creator
         )
         if eps_data is not None and jpg_data is not None:
-            safe_name = sanitize_filename(orig_filename)
             suffix = f"{base_suffix}_{i+1}" if len(files_data) > 1 else f"{base_suffix}"
             return {
                 "eps_name": f"{safe_name}_{suffix}.eps",
@@ -234,13 +243,14 @@ async def freepik_vectorize_endpoint(
     threshold: int = Form(127),
     invert: str = Form("false"),
     mode: str = Form("monochrome"),
-    numColors: int = Form(4)
+    numColors: int = Form(4),
+    creator: str = Form("peripirdaus")
 ):
     try:
         inv = str_to_bool(invert)
         files_data = [(f.filename, await f.read()) for f in files]
         
-        results = await asyncio.to_thread(_sync_freepik_batch, files_data, threshold, inv, mode, numColors)
+        results = await asyncio.to_thread(_sync_freepik_batch, files_data, threshold, inv, mode, numColors, creator)
         if not results:
             raise HTTPException(status_code=400, detail="Tidak ada ikon yang terdeteksi untuk Freepik.")
 
@@ -253,13 +263,14 @@ async def freepik_vectorize_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_adobe_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, fill_holes: bool, format: str):
+def _sync_adobe_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, fill_holes: bool, format: str, creator: str = "peripirdaus"):
     zip_buffer = io.BytesIO()
     ext = format.lower()
     is_bulk = len(files_data) > 1
     
     if not is_bulk:
         orig_filename, contents = files_data[0]
+        safe_name = sanitize_filename(orig_filename)
         vec_data = vectorize_adobe_stock(
             contents,
             threshold_val=threshold,
@@ -267,12 +278,15 @@ def _sync_adobe_batch(files_data: list, threshold: int, inv: bool, mode: str, nu
             mode=mode,
             num_colors=num_colors,
             fill_holes=fill_holes,
-            fmt=ext
+            fmt=ext,
+            title=f"{safe_name}.{ext}",
+            creator=creator
         )
         return vec_data, None
     else:
         def _proc_item(args):
             i, (orig_filename, contents) = args
+            safe_name = sanitize_filename(orig_filename)
             vec_data = vectorize_adobe_stock(
                 contents,
                 threshold_val=threshold,
@@ -280,10 +294,11 @@ def _sync_adobe_batch(files_data: list, threshold: int, inv: bool, mode: str, nu
                 mode=mode,
                 num_colors=num_colors,
                 fill_holes=fill_holes,
-                fmt=ext
+                fmt=ext,
+                title=f"{safe_name}_{i+1}.{ext}",
+                creator=creator
             )
             if vec_data is not None:
-                safe_name = sanitize_filename(orig_filename)
                 filename = f"{safe_name}_{i+1}.{ext}"
                 data_bytes = vec_data if isinstance(vec_data, bytes) else vec_data.encode()
                 return filename, data_bytes
@@ -312,7 +327,8 @@ async def adobe_stock_vectorize_endpoint(
     mode: str = Form("monochrome"),
     numColors: int = Form(4),
     fillHoles: str = Form("true"),
-    format: str = Form("eps")
+    format: str = Form("eps"),
+    creator: str = Form("peripirdaus")
 ):
     try:
         inv = str_to_bool(invert)
@@ -320,7 +336,7 @@ async def adobe_stock_vectorize_endpoint(
         ext = format.lower()
         files_data = [(f.filename, await f.read()) for f in files]
         
-        result_data, is_zip = await asyncio.to_thread(_sync_adobe_batch, files_data, threshold, inv, mode, numColors, fill_h, ext)
+        result_data, is_zip = await asyncio.to_thread(_sync_adobe_batch, files_data, threshold, inv, mode, numColors, fill_h, ext, creator)
         if not result_data:
             raise HTTPException(status_code=400, detail="Tidak ada ikon yang terdeteksi untuk Adobe Stock.")
             
@@ -346,13 +362,14 @@ async def adobe_stock_vectorize_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, format: str, alphamax: float, opttolerance: float):
+def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, format: str, alphamax: float, opttolerance: float, creator: str = "peripirdaus"):
     zip_buffer = io.BytesIO()
     ext = format.lower()
     is_bulk = len(files_data) > 1
     
     if not is_bulk:
         orig_filename, contents = files_data[0]
+        safe_name = sanitize_filename(orig_filename)
         eps_data, jpg_data = vectorize_vecteezy(
             contents,
             threshold_val=threshold,
@@ -361,13 +378,17 @@ def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str,
             num_colors=num_colors,
             fmt=ext,
             alphamax=alphamax,
-            opttolerance=opttolerance
+            opttolerance=opttolerance,
+            title=f"{safe_name}.{ext}",
+            creator=creator
         )
         return (eps_data, jpg_data), False
     else:
         base_suffix = int(time.time() % 10000)
         def _proc_item(args):
             i, (orig_filename, contents) = args
+            safe_name = sanitize_filename(orig_filename)
+            suffix = f"{base_suffix}_{i+1}"
             eps_data, jpg_data = vectorize_vecteezy(
                 contents,
                 threshold_val=threshold,
@@ -376,11 +397,11 @@ def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str,
                 num_colors=num_colors,
                 fmt=ext,
                 alphamax=alphamax,
-                opttolerance=opttolerance
+                opttolerance=opttolerance,
+                title=f"{safe_name}_{suffix}.{ext}",
+                creator=creator
             )
             if eps_data is not None:
-                safe_name = sanitize_filename(orig_filename)
-                suffix = f"{base_suffix}_{i+1}"
                 eps_bytes = eps_data if isinstance(eps_data, bytes) else eps_data.encode()
                 return f"{safe_name}_{suffix}.{ext}", eps_bytes, f"{safe_name}_{suffix}.jpg", jpg_data
             return None
@@ -411,14 +432,15 @@ async def vecteezy_vectorize_endpoint(
     numColors: int = Form(4),
     format: str = Form("eps"),
     alphamax: float = Form(0.75),
-    opttolerance: float = Form(0.20)
+    opttolerance: float = Form(0.20),
+    creator: str = Form("peripirdaus")
 ):
     try:
         inv = str_to_bool(invert)
         ext = format.lower()
         files_data = [(f.filename, await f.read()) for f in files]
         
-        result_data, is_zip = await asyncio.to_thread(_sync_vecteezy_batch, files_data, threshold, inv, mode, numColors, ext, alphamax, opttolerance)
+        result_data, is_zip = await asyncio.to_thread(_sync_vecteezy_batch, files_data, threshold, inv, mode, numColors, ext, alphamax, opttolerance, creator)
         if not result_data:
             raise HTTPException(status_code=400, detail="Tidak ada ikon yang terdeteksi untuk Vecteezy.")
             

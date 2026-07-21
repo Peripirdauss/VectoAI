@@ -106,6 +106,7 @@ function App() {
   const [numColors, setNumColors] = useState(4);
   const [fillHoles, setFillHoles] = useState(true);
   const [cornerSharpness, setCornerSharpness] = useState(0.75);
+  const [creator, setCreator] = useState('peripirdaus');
   
   // Canvas & Preview state
   const [canvasBg, setCanvasBg] = useState<'checkerboard' | 'dark' | 'white'>('checkerboard');
@@ -230,6 +231,7 @@ function App() {
         formData.append('format', format);
         formData.append('mode', mode);
         formData.append('numColors', numColors.toString());
+        formData.append('creator', creator);
 
         const response = await axios.post(`${API_BASE}/vectorize`, formData, {
           responseType: 'blob',
@@ -264,6 +266,7 @@ function App() {
             formData.append('format', format);
             formData.append('mode', mode);
             formData.append('numColors', numColors.toString());
+            formData.append('creator', creator);
 
             const response = await axios.post(`${API_BASE}/vectorize`, formData, {
               responseType: 'arraybuffer',
@@ -329,6 +332,7 @@ function App() {
           formData.append('invert', invert.toString());
           formData.append('mode', mode);
           formData.append('numColors', numColors.toString());
+          formData.append('creator', creator);
 
           const response = await axios.post(`${API_BASE}/freepik-vectorize`, formData, { timeout: 60000 });
           const data = response.data;
@@ -392,6 +396,7 @@ function App() {
         formData.append('mode', mode);
         formData.append('numColors', numColors.toString());
         formData.append('fillHoles', fillHoles.toString());
+        formData.append('creator', creator);
 
         const response = await axios.post(`${API_BASE}/adobe-stock-vectorize`, formData, {
           responseType: 'blob',
@@ -427,6 +432,7 @@ function App() {
             formData.append('mode', mode);
             formData.append('numColors', numColors.toString());
             formData.append('fillHoles', fillHoles.toString());
+            formData.append('creator', creator);
 
             const response = await axios.post(`${API_BASE}/adobe-stock-vectorize`, formData, {
               responseType: 'arraybuffer',
@@ -481,6 +487,7 @@ function App() {
         formData.append('mode', mode);
         formData.append('numColors', numColors.toString());
         formData.append('alphamax', cornerSharpness.toString());
+        formData.append('creator', creator);
 
         const response = await axios.post(`${API_BASE}/vecteezy-vectorize`, formData, {
           responseType: 'blob',
@@ -518,6 +525,7 @@ function App() {
             formData.append('mode', mode);
             formData.append('numColors', numColors.toString());
             formData.append('alphamax', cornerSharpness.toString());
+            formData.append('creator', creator);
 
             const response = await axios.post(`${API_BASE}/vecteezy-vectorize`, formData, {
               responseType: 'arraybuffer',
@@ -790,6 +798,21 @@ function App() {
                   </div>
 
                   <div className="space-y-5">
+                    {/* Author / Creator Tag Input */}
+                    <div>
+                      <label className="text-xs font-semibold text-slate-300 block mb-1.5 flex items-center justify-between">
+                        <span>Author / Creator Tag</span>
+                        <span className="text-[10px] text-slate-500 font-mono">%%Creator header</span>
+                      </label>
+                      <input 
+                        type="text" 
+                        value={creator} 
+                        onChange={(e) => setCreator(e.target.value)}
+                        placeholder="e.g. peripirdaus"
+                        className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono text-purple-300 focus:outline-none focus:border-purple-500/50 transition-colors"
+                      />
+                    </div>
+
                     {/* Mode Selector */}
                     <div>
                       <label className="text-xs font-semibold text-slate-300 block mb-2">Tracing Mode</label>
