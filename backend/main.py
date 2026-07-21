@@ -21,6 +21,8 @@ from backend.vectorizer import (
     process_image, vectorize, process_color_image, vectorize_color,
     vectorize_freepik, vectorize_adobe_stock, vectorize_vecteezy, preflight_check
 )
+from backend.duplicate_finder import find_duplicates_in_batch
+from backend.ftp_uploader import test_ftp_connection, upload_files_to_ftp
 
 app = FastAPI(title="Vecto Studio API")
 
@@ -518,6 +520,56 @@ async def preflight_audit_endpoint(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+@app.post("/api/check-duplicates")
+async def check_duplicates_endpoint(
+    files: List[UploadFile] = File(...),
+    threshold: float = Form(85.0)
+):
+    try:
+        files_data = [(f.filename, await f.read()) for f in files]
+        duplicates = await asyncio.to_thread(find_duplicates_in_batch, files_data, threshold)
+        return {"duplicates": duplicates, "count": len(duplicates)}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ftp/test")
+async def test_ftp_endpoint(
+    host: str = Form(...),
+    port: int = Form(21),
+    username: str = Form(""),
+    password: str = Form("")
+):
+    try:
+        res = await asyncio.to_thread(test_ftp_connection, host, port, username, password)
+        return res
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/ftp/upload")
+async def upload_ftp_endpoint(
+    host: str = Form(...),
+    port: int = Form(21),
+    username: str = Form(""),
+    password: str = Form(""),
+    remoteDir: str = Form("/"),
+    files: List[UploadFile] = File(...)
+):
+    try:
+        files_data = [(f.filename, await f.read()) for f in files]
+        res = await asyncio.to_thread(upload_files_to_ftp, host, port, username, password, remoteDir, files_data)
+        return res
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

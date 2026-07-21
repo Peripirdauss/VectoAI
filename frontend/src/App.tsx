@@ -5,7 +5,7 @@ import {
   Upload, Download, RefreshCw, Layers, AlertCircle, FileText, Trash2, 
   Check, Sparkles, CheckCircle2, Image as ImageIcon, ShieldCheck, 
   Eye, Grid, Sun, Moon, FileCheck, Layers3, Activity, Sliders,
-  Package
+  Package, Globe, Server, Send
 } from 'lucide-react';
 
 const API_BASE = '/api';
@@ -144,6 +144,81 @@ function App() {
     if (p.splitGrid !== undefined) setSplitGrid(p.splitGrid);
     if (p.includePng !== undefined) setIncludePng(p.includePng);
   };
+
+  // Duplicate Finder & FTP Uploader State
+  const [duplicateWarnings, setDuplicateWarnings] = useState<Record<number, number>>({});
+  const [showFtpModal, setShowFtpModal] = useState(false);
+  const [ftpHost, setFtpHost] = useState(() => localStorage.getItem('vecto_ftp_host') || 'ftp.shutterstock.com');
+  const [ftpPort, setFtpPort] = useState(21);
+  const [ftpUser, setFtpUser] = useState(() => localStorage.getItem('vecto_ftp_user') || '');
+  const [ftpPass, setFtpPass] = useState(() => localStorage.getItem('vecto_ftp_pass') || '');
+  const [ftpDir, setFtpDir] = useState('/');
+  const [ftpStatus, setFtpStatus] = useState<string | null>(null);
+  const [ftpUploading, setFtpUploading] = useState(false);
+
+  // Auto-detect duplicates when files change
+  const checkForDuplicates = useCallback(async (fileList: FileItem[]) => {
+    if (fileList.length < 2) {
+      setDuplicateWarnings({});
+      return;
+    }
+    try {
+      const formData = new FormData();
+      fileList.forEach(item => formData.append('files', item.file));
+      formData.append('threshold', '85.0');
+      const res = await axios.post(`${API_BASE}/check-duplicates`, formData);
+      const warnings: Record<number, number> = {};
+      if (res.data && Array.isArray(res.data.duplicates)) {
+        res.data.duplicates.forEach((pair: any) => {
+          warnings[pair.index_b] = Math.max(warnings[pair.index_b] || 0, pair.similarity);
+        });
+      }
+      setDuplicateWarnings(warnings);
+    } catch (e) {
+      console.error('Duplicate check error:', e);
+    }
+  }, []);
+
+  const handleTestFtp = async () => {
+    setFtpStatus('Menguji koneksi ke server FTP...');
+    try {
+      const formData = new FormData();
+      formData.append('host', ftpHost);
+      formData.append('port', ftpPort.toString());
+      formData.append('username', ftpUser);
+      formData.append('password', ftpPass);
+      const res = await axios.post(`${API_BASE}/ftp/test`, formData);
+      setFtpStatus(res.data.message);
+    } catch (err: any) {
+      setFtpStatus(`Gagal tes FTP: ${err.message}`);
+    }
+  };
+
+  const handleUploadToFtp = async () => {
+    if (files.length === 0) return;
+    setFtpUploading(true);
+    setFtpStatus(`Menyiapkan pengunggahan ${files.length} file ke FTP ${ftpHost}...`);
+    try {
+      const formData = new FormData();
+      formData.append('host', ftpHost);
+      formData.append('port', ftpPort.toString());
+      formData.append('username', ftpUser);
+      formData.append('password', ftpPass);
+      formData.append('remoteDir', ftpDir);
+      files.forEach(f => formData.append('files', f.file));
+
+      const res = await axios.post(`${API_BASE}/ftp/upload`, formData, { timeout: 120000 });
+      if (res.data.success) {
+        setFtpStatus(`✓ Berhasil mengunggah ${res.data.uploaded_count} file ke ${ftpHost}!`);
+      } else {
+        setFtpStatus(`⚠️ Upload selesai dengan kendala: ${res.data.errors?.join(', ')}`);
+      }
+    } catch (err: any) {
+      setFtpStatus(`Gagal mengunggah ke FTP: ${err.message}`);
+    } finally {
+      setFtpUploading(false);
+    }
+  };
   
   // Canvas & Preview state
   const [canvasBg, setCanvasBg] = useState<'checkerboard' | 'dark' | 'white'>('checkerboard');
@@ -206,6 +281,7 @@ function App() {
     setFiles(updatedFiles);
     if (selectedIndex === null) setSelectedIndex(0);
     setError(null);
+    checkForDuplicates(updatedFiles);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -346,7 +422,6 @@ function App() {
     setError(null);
 
     const zip = new JSZip();
-    const baseSuffix = Math.floor(Date.now() % 10000);
     let successCount = 0;
 
     try {
@@ -668,6 +743,14 @@ function App() {
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowFtpModal(true)}
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-purple-500/10 border border-purple-500/30 hover:border-purple-400 text-xs font-bold text-purple-300 transition-all shadow-md shadow-purple-500/5"
+            >
+              <Globe size={14} className="text-purple-400" />
+              <span>Direct FTP Upload</span>
+            </button>
+
             <div className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs font-medium text-slate-300">
               <Activity size={14} className="text-emerald-400 animate-pulse" />
               <span>Backend Ready</span>
@@ -803,6 +886,11 @@ function App() {
                           <span className="text-[10px] text-purple-400/90 font-mono block">
                             Sync: {computeExportFilename(item.file.name, idx, files.length, format)}
                           </span>
+                          {duplicateWarnings[idx] && (
+                            <span className="text-[9px] font-bold text-amber-400 bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.5 rounded flex items-center gap-1 w-fit mt-0.5" title="Potensi file duplikat (kemiripan tinggi)">
+                              <AlertCircle size={10} /> Duplikat {duplicateWarnings[idx]}%
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -1371,6 +1459,140 @@ function App() {
         <footer className="mt-12 text-center text-slate-500 text-xs border-t border-slate-800/80 pt-6">
           <p>© 2026 Vecto Studio. Professional Batch Vectorization Suite.</p>
         </footer>
+
+        {/* FTP Upload Modal */}
+        {showFtpModal && (
+          <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl max-w-lg w-full shadow-2xl space-y-4 glow-purple relative">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <Server size={20} className="text-purple-400" />
+                  <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider font-mono">
+                    Direct Microstock FTP Uploader
+                  </h3>
+                </div>
+                <button 
+                  onClick={() => setShowFtpModal(false)}
+                  className="text-slate-500 hover:text-slate-200 text-xs font-bold px-2 py-1 rounded bg-slate-800"
+                >
+                  Tutup
+                </button>
+              </div>
+
+              {/* Preset Host Quick Select */}
+              <div className="space-y-1">
+                <label className="text-[11px] font-semibold text-slate-400">Pilih Server Microstock:</label>
+                <div className="grid grid-cols-4 gap-1.5 text-xs">
+                  {[
+                    { name: 'Shutterstock', host: 'ftp.shutterstock.com' },
+                    { name: 'Freepik', host: 'ftp.freepik.com' },
+                    { name: 'Adobe Stock', host: 'ftp.adobestock.com' },
+                    { name: 'Vecteezy', host: 'upload.vecteezy.com' }
+                  ].map(agency => (
+                    <button 
+                      key={agency.name}
+                      onClick={() => {
+                        setFtpHost(agency.host);
+                        localStorage.setItem('vecto_ftp_host', agency.host);
+                      }}
+                      className={`py-1.5 px-2 rounded-lg border text-[10px] font-bold truncate ${
+                        ftpHost === agency.host 
+                          ? 'border-purple-500 bg-purple-500/10 text-purple-300' 
+                          : 'border-slate-800 text-slate-400 hover:bg-slate-800'
+                      }`}
+                    >
+                      {agency.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="col-span-2 sm:col-span-1">
+                  <label className="block text-slate-400 mb-1">FTP Host</label>
+                  <input 
+                    type="text" 
+                    value={ftpHost} 
+                    onChange={(e) => {
+                      setFtpHost(e.target.value);
+                      localStorage.setItem('vecto_ftp_host', e.target.value);
+                    }}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-200 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div className="col-span-2 sm:col-span-1">
+                  <label className="block text-slate-400 mb-1">Port</label>
+                  <input 
+                    type="number" 
+                    value={ftpPort} 
+                    onChange={(e) => setFtpPort(parseInt(e.target.value))}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-200 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div className="col-span-2 sm:col-span-1">
+                  <label className="block text-slate-400 mb-1">Username / Email</label>
+                  <input 
+                    type="text" 
+                    value={ftpUser} 
+                    onChange={(e) => {
+                      setFtpUser(e.target.value);
+                      localStorage.setItem('vecto_ftp_user', e.target.value);
+                    }}
+                    placeholder="User FTP microstock..."
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-200 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div className="col-span-2 sm:col-span-1">
+                  <label className="block text-slate-400 mb-1">Password / FTP Key</label>
+                  <input 
+                    type="password" 
+                    value={ftpPass} 
+                    onChange={(e) => {
+                      setFtpPass(e.target.value);
+                      localStorage.setItem('vecto_ftp_pass', e.target.value);
+                    }}
+                    placeholder="Password FTP..."
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-200 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-slate-400 mb-1">Remote Directory Path</label>
+                  <input 
+                    type="text" 
+                    value={ftpDir} 
+                    onChange={(e) => setFtpDir(e.target.value)}
+                    placeholder="/ or /uploads"
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-slate-200 focus:outline-none focus:border-purple-500"
+                  />
+                </div>
+              </div>
+
+              {ftpStatus && (
+                <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs font-mono text-purple-300">
+                  {ftpStatus}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-2">
+                <button 
+                  onClick={handleTestFtp}
+                  disabled={ftpUploading}
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 transition-colors"
+                >
+                  Uji Koneksi
+                </button>
+                <button 
+                  onClick={handleUploadToFtp}
+                  disabled={ftpUploading || files.length === 0}
+                  className="flex items-center gap-2 px-5 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-40 text-xs font-bold text-white shadow-lg shadow-purple-500/25 transition-all"
+                >
+                  <Send size={14} />
+                  <span>{ftpUploading ? 'Mengunggah...' : `Upload ${files.length} Berkas ke FTP`}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>
