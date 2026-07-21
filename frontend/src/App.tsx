@@ -107,6 +107,43 @@ function App() {
   const [fillHoles, setFillHoles] = useState(true);
   const [cornerSharpness, setCornerSharpness] = useState(0.75);
   const [creator, setCreator] = useState('peripirdaus');
+  const [splitGrid, setSplitGrid] = useState(false);
+  const [includePng, setIncludePng] = useState(true);
+
+  // Custom UI Presets Manager State
+  const [presetName, setPresetName] = useState('');
+  const [savedPresets, setSavedPresets] = useState<Record<string, any>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem('vecto_custom_presets') || '{}');
+    } catch {
+      return {};
+    }
+  });
+
+  const saveCurrentPreset = () => {
+    if (!presetName.trim()) return;
+    const newPreset = {
+      threshold, invert, mode, numColors, fillHoles, cornerSharpness, creator, splitGrid, includePng
+    };
+    const updated = { ...savedPresets, [presetName.trim()]: newPreset };
+    setSavedPresets(updated);
+    localStorage.setItem('vecto_custom_presets', JSON.stringify(updated));
+    setPresetName('');
+  };
+
+  const loadPreset = (name: string) => {
+    const p = savedPresets[name];
+    if (!p) return;
+    if (p.threshold !== undefined) setThreshold(p.threshold);
+    if (p.invert !== undefined) setInvert(p.invert);
+    if (p.mode !== undefined) setMode(p.mode);
+    if (p.numColors !== undefined) setNumColors(p.numColors);
+    if (p.fillHoles !== undefined) setFillHoles(p.fillHoles);
+    if (p.cornerSharpness !== undefined) setCornerSharpness(p.cornerSharpness);
+    if (p.creator !== undefined) setCreator(p.creator);
+    if (p.splitGrid !== undefined) setSplitGrid(p.splitGrid);
+    if (p.includePng !== undefined) setIncludePng(p.includePng);
+  };
   
   // Canvas & Preview state
   const [canvasBg, setCanvasBg] = useState<'checkerboard' | 'dark' | 'white'>('checkerboard');
@@ -333,23 +370,27 @@ function App() {
           formData.append('mode', mode);
           formData.append('numColors', numColors.toString());
           formData.append('creator', creator);
+          formData.append('splitGrid', splitGrid.toString());
 
           const response = await axios.post(`${API_BASE}/freepik-vectorize`, formData, { timeout: 60000 });
           const data = response.data;
 
-          if (data && Array.isArray(data.files) && data.files[0]) {
-            const entry = data.files[0];
-            const safeName = sanitizeFilename(fItem.file.name);
-            const suffix = files.length > 1 ? `${baseSuffix}_${i + 1}` : `${baseSuffix}`;
-            const epsName = `${safeName}_${suffix}.eps`;
-            const jpgName = `${safeName}_${suffix}.jpg`;
-
-            const epsBytes = Uint8Array.from(atob(entry.eps_b64), c => c.charCodeAt(0));
-            const jpgBytes = Uint8Array.from(atob(entry.jpg_b64), c => c.charCodeAt(0));
-
-            zip.file(epsName, epsBytes);
-            zip.file(jpgName, jpgBytes);
-            successCount++;
+          if (data && Array.isArray(data.files)) {
+            for (const entry of data.files) {
+              if (entry.eps_b64) {
+                const epsBytes = Uint8Array.from(atob(entry.eps_b64), c => c.charCodeAt(0));
+                zip.file(entry.eps_name, epsBytes);
+              }
+              if (entry.jpg_b64) {
+                const jpgBytes = Uint8Array.from(atob(entry.jpg_b64), c => c.charCodeAt(0));
+                zip.file(entry.jpg_name, jpgBytes);
+              }
+              if (includePng && entry.png_b64 && entry.png_name) {
+                const pngBytes = Uint8Array.from(atob(entry.png_b64), c => c.charCodeAt(0));
+                zip.file(entry.png_name, pngBytes);
+              }
+              successCount++;
+            }
           }
         } catch (itemErr) {
           console.error(`Error processing Freepik file ${fItem.file.name}:`, itemErr);
@@ -798,6 +839,42 @@ function App() {
                   </div>
 
                   <div className="space-y-5">
+                    {/* Custom Presets Manager */}
+                    <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                          <Package size={13} className="text-purple-400" /> Presets Manager
+                        </label>
+                        {Object.keys(savedPresets).length > 0 && (
+                          <select 
+                            onChange={(e) => loadPreset(e.target.value)}
+                            className="bg-slate-950 text-purple-300 text-xs px-2 py-1 rounded border border-slate-700 font-mono focus:outline-none"
+                          >
+                            <option value="">Load Preset...</option>
+                            {Object.keys(savedPresets).map(name => (
+                              <option key={name} value={name}>{name}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <input 
+                          type="text"
+                          placeholder="Simpan preset kustom..."
+                          value={presetName}
+                          onChange={(e) => setPresetName(e.target.value)}
+                          className="flex-1 bg-slate-950 text-xs px-2.5 py-1.5 rounded-lg border border-slate-800 text-slate-200 focus:outline-none focus:border-purple-500/50"
+                        />
+                        <button 
+                          onClick={saveCurrentPreset}
+                          disabled={!presetName.trim()}
+                          className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-white rounded-lg text-xs font-bold transition-all"
+                        >
+                          Simpan
+                        </button>
+                      </div>
+                    </div>
+
                     {/* Author / Creator Tag Input */}
                     <div>
                       <label className="text-xs font-semibold text-slate-300 block mb-1.5 flex items-center justify-between">
@@ -811,6 +888,35 @@ function App() {
                         placeholder="e.g. peripirdaus"
                         className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs font-mono text-purple-300 focus:outline-none focus:border-purple-500/50 transition-colors"
                       />
+                    </div>
+
+                    {/* Feature Toggles */}
+                    <div className="space-y-2">
+                      <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 cursor-pointer hover:border-slate-700 transition-all">
+                        <input 
+                          type="checkbox" 
+                          checked={splitGrid} 
+                          onChange={(e) => setSplitGrid(e.target.checked)}
+                          className="w-4 h-4 rounded accent-purple-500"
+                        />
+                        <div className="text-xs">
+                          <span className="font-semibold text-slate-200 block">Auto-Split Icon Grid Sheet</span>
+                          <span className="text-slate-500 text-[10px]">Memotong tiap ikon pada sheet jadi file individual</span>
+                        </div>
+                      </label>
+
+                      <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 cursor-pointer hover:border-slate-700 transition-all">
+                        <input 
+                          type="checkbox" 
+                          checked={includePng} 
+                          onChange={(e) => setIncludePng(e.target.checked)}
+                          className="w-4 h-4 rounded accent-pink-500"
+                        />
+                        <div className="text-xs">
+                          <span className="font-semibold text-slate-200 block">Export Transparent PNG</span>
+                          <span className="text-slate-500 text-[10px]">Sertakan PNG transparan HD dalam paket ZIP</span>
+                        </div>
+                      </label>
                     </div>
 
                     {/* Mode Selector */}

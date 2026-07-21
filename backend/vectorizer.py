@@ -543,6 +543,101 @@ def render_to_jpg_bytes(icon_layers, width, height, scale=1.0, colored_layers=No
     return jpg_encoded.tobytes()
 
 
+def render_to_png_transparent(icon_layers, W, H, off_x=0, off_y=0, scale_factor=1.0, colored_layers=None):
+    """
+    Renders transparent high-res PNG (ARGB32) without background paint.
+    """
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
+    ctx = cairo.Context(surface)
+    ctx.translate(off_x, off_y)
+
+    if colored_layers:
+        for layer in colored_layers:
+            r, g, b = layer["color"]
+            ctx.set_source_rgba(r / 255.0, g / 255.0, b / 255.0, 1.0)
+            for curve in layer["curves"]:
+                p = curve.start_point
+                ctx.move_to(p.x * scale_factor, p.y * scale_factor)
+                for seg in curve:
+                    if seg.is_corner:
+                        ctx.line_to(seg.c.x * scale_factor, seg.c.y * scale_factor)
+                        ctx.line_to(seg.end_point.x * scale_factor, seg.end_point.y * scale_factor)
+                    else:
+                        ctx.curve_to(seg.c1.x * scale_factor, seg.c1.y * scale_factor,
+                                     seg.c2.x * scale_factor, seg.c2.y * scale_factor,
+                                     seg.end_point.x * scale_factor, seg.end_point.y * scale_factor)
+                ctx.close_path()
+            ctx.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+            ctx.fill()
+    elif icon_layers:
+        ctx.set_source_rgba(0.0, 0.0, 0.0, 1.0)
+        for curves in icon_layers:
+            for curve in curves:
+                p = curve.start_point
+                ctx.move_to(p.x * scale_factor, p.y * scale_factor)
+                for seg in curve:
+                    if seg.is_corner:
+                        ctx.line_to(seg.c.x * scale_factor, seg.c.y * scale_factor)
+                        ctx.line_to(seg.end_point.x * scale_factor, seg.end_point.y * scale_factor)
+                    else:
+                        ctx.curve_to(seg.c1.x * scale_factor, seg.c1.y * scale_factor,
+                                     seg.c2.x * scale_factor, seg.c2.y * scale_factor,
+                                     seg.end_point.x * scale_factor, seg.end_point.y * scale_factor)
+                ctx.close_path()
+            ctx.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
+            ctx.fill()
+
+    data = surface.get_data()
+    img_np = np.frombuffer(data, dtype=np.uint8).reshape((H, W, 4))
+    img_bgra = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGRA)
+    _, png_encoded = cv2.imencode('.png', img_bgra)
+    return png_encoded.tobytes()
+
+
+def split_grid_icons(icon_layers, title="Vector Illustration", creator="peripirdaus", target_dim=2000):
+    """
+    Grid Auto-Splitter: Takes icon_layers (list of curve groups per icon),
+    normalizes each icon onto its own centered 2000x2000 canvas with 10% margin,
+    and returns individual EPS, JPG, and PNG bytes for each sub-icon.
+    """
+    if not icon_layers:
+        return []
+
+    split_results = []
+    inner_dim = target_dim * 0.80  # 10% safe margin on each side
+
+    for idx, curves in enumerate(icon_layers):
+        all_pts = []
+        for curve in curves:
+            all_pts.append(curve.start_point)
+            all_pts.extend([seg.end_point for seg in curve])
+
+        xs = [p.x for p in all_pts]
+        ys = [p.y for p in all_pts]
+        mn_x, mx_x = min(xs), max(xs)
+        mn_y, mx_y = min(ys), max(ys)
+        iw = max(1.0, mx_x - mn_x)
+        ih = max(1.0, mx_y - mn_y)
+
+        scale_factor = min(inner_dim / iw, inner_dim / ih)
+        off_x = (target_dim - iw * scale_factor) / 2.0 - (mn_x * scale_factor)
+        off_y = (target_dim - ih * scale_factor) / 2.0 - (mn_y * scale_factor)
+
+        sub_title = f"{title}_icon_{idx+1}.eps"
+        eps_bytes = _render_freepik_eps([curves], target_dim, target_dim, off_x, off_y, scale_factor, title=sub_title, creator=creator)
+        jpg_bytes = render_to_jpg_freepik([curves], target_dim, target_dim, off_x, off_y, scale_factor)
+        png_bytes = render_to_png_transparent([curves], target_dim, target_dim, off_x, off_y, scale_factor)
+
+        split_results.append({
+            "sub_index": idx + 1,
+            "eps": pad_eps_to_minimum(eps_bytes, 550000),
+            "jpg": pad_jpg_to_minimum(jpg_bytes, 550000),
+            "png": png_bytes
+        })
+
+    return split_results
+
+
 
 
 
@@ -764,18 +859,15 @@ def render_to_jpg_freepik(icon_layers, W, H, off_x, off_y, scale_factor, colored
     return jpg_encoded.tobytes()
 
 
-def vectorize_freepik(image_bytes, threshold_val=127, invert=False, mode="monochrome", num_colors=4, title="Vector Illustration", creator="peripirdaus", opttolerance=0.1, alphamax=1.0, min_noise_size=3):
+def vectorize_freepik(image_bytes, threshold_val=127, invert=False, mode="monochrome", num_colors=4, title="Vector Illustration", creator="peripirdaus", opttolerance=0.1, alphamax=1.0, min_noise_size=3, split_grid=False, include_png=True):
     """
-    Traces image and returns (eps_data, jpg_data) satisfying Freepik guidelines:
-    - EPS & JPG share EXACT artboard dimensions (min 2000px, max 8000px) and alignment.
-    - EPS: clean vector-only (RGB mode, PostScript Level 2 / EPS 10, no embedded bitmaps).
-    - JPG: matching high-res white-background preview (100% JPEG quality).
-    - Both EPS & JPG >= 500 KB (0.5 MB minimum file size requirement).
+    Traces image and returns (eps_data, jpg_data, png_data) satisfying Freepik guidelines,
+    with optional Grid Auto-Splitter mode.
     """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img_raw = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
     if img_raw is None:
-        return None, None
+        return None, None, None
     orig_h, orig_w = img_raw.shape[:2]
 
     # Calculate Freepik artboard size:
@@ -803,7 +895,7 @@ def vectorize_freepik(image_bytes, threshold_val=127, invert=False, mode="monoch
     if mode == "color":
         quantized_preview, (width, height), color_masks = process_color_image(image_bytes, num_colors=num_colors)
         if color_masks is None:
-            return None, None
+            return None, None, None
 
         scale_factor = min(inner_w / max(1, width), inner_h / max(1, height))
         off_x = (W - width * scale_factor) / 2.0
@@ -818,15 +910,16 @@ def vectorize_freepik(image_bytes, threshold_val=127, invert=False, mode="monoch
                 colored_layers.append({"color": layer["color"], "curves": path})
 
         if not colored_layers:
-            return None, None
+            return None, None, None
 
         eps_raw = _render_freepik_color_eps(colored_layers, W, H, off_x, off_y, scale_factor, title=title, creator=creator)
         jpg_raw = render_to_jpg_freepik(None, W, H, off_x, off_y, scale_factor, colored_layers=colored_layers)
+        png_raw = render_to_png_transparent(None, W, H, off_x, off_y, scale_factor, colored_layers=colored_layers)
 
     else:  # Monochrome
         thresh_img, (width, height) = process_image(image_bytes, threshold_val=threshold_val, invert=invert)
         if thresh_img is None:
-            return None, None
+            return None, None, None
 
         scale_factor = min(inner_w / max(1, width), inner_h / max(1, height))
         off_x = (W - width * scale_factor) / 2.0
@@ -836,7 +929,7 @@ def vectorize_freepik(image_bytes, threshold_val=127, invert=False, mode="monoch
         path = bm.trace(turdsize=5, alphamax=alphamax, opttolerance=opttolerance)
         path = filter_noise_curves(path, min_noise_size=min_noise_size)
         if not path or len(path) == 0:
-            return None, None
+            return None, None, None
 
         border = 2
         keep = []
@@ -855,14 +948,20 @@ def vectorize_freepik(image_bytes, threshold_val=127, invert=False, mode="monoch
 
         icon_layers = _cluster(keep, width, height)
 
+        if split_grid and len(icon_layers) > 1:
+            split_items = split_grid_icons(icon_layers, title=title, creator=creator)
+            return split_items, True, True
+
         eps_raw = _render_freepik_eps(icon_layers, W, H, off_x, off_y, scale_factor, title=title, creator=creator)
         jpg_raw = render_to_jpg_freepik(icon_layers, W, H, off_x, off_y, scale_factor, colored_layers=None)
+        png_raw = render_to_png_transparent(icon_layers, W, H, off_x, off_y, scale_factor, colored_layers=None)
 
     eps_bytes = eps_raw if isinstance(eps_raw, bytes) else eps_raw.encode("ascii", "replace")
     eps_final = pad_eps_to_minimum(eps_bytes, 550000)
     jpg_final = pad_jpg_to_minimum(jpg_raw, 550000)
+    png_final = png_raw
 
-    return eps_final, jpg_final
+    return eps_final, jpg_final, png_final
 
 
 

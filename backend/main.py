@@ -203,37 +203,62 @@ async def bulk_vectorize_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_freepik_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, creator: str = "peripirdaus"):
+def _sync_freepik_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, creator: str = "peripirdaus", split_grid: bool = False):
     base_suffix = int(time.time() % 10000)
     
     def _proc_item(args):
         i, (orig_filename, contents) = args
         safe_name = sanitize_filename(orig_filename)
         eps_title = f"{safe_name}.eps"
-        eps_data, jpg_data = vectorize_freepik(
+        res1, res2, res3 = vectorize_freepik(
             contents,
             threshold_val=threshold,
             invert=inv,
             mode=mode,
             num_colors=num_colors,
             title=eps_title,
-            creator=creator
+            creator=creator,
+            split_grid=split_grid
         )
-        if eps_data is not None and jpg_data is not None:
+        if res1 is None:
+            return None
+
+        # Check if grid auto-splitter produced sub-items
+        if res2 is True and isinstance(res1, list):
+            sub_entries = []
+            for sub in res1:
+                idx_str = f"{base_suffix}_{i+1}_sub_{sub['sub_index']}"
+                sub_entries.append({
+                    "eps_name": f"{safe_name}_{idx_str}.eps",
+                    "jpg_name": f"{safe_name}_{idx_str}.jpg",
+                    "png_name": f"{safe_name}_{idx_str}.png",
+                    "eps_b64": base64.b64encode(sub["eps"]).decode(),
+                    "jpg_b64": base64.b64encode(sub["jpg"]).decode(),
+                    "png_b64": base64.b64encode(sub["png"]).decode(),
+                })
+            return sub_entries
+        else:
+            eps_data, jpg_data, png_data = res1, res2, res3
             suffix = f"{base_suffix}_{i+1}" if len(files_data) > 1 else f"{base_suffix}"
-            return {
+            item = {
                 "eps_name": f"{safe_name}_{suffix}.eps",
                 "jpg_name": f"{safe_name}_{suffix}.jpg",
                 "eps_b64": base64.b64encode(eps_data if isinstance(eps_data, bytes) else eps_data.encode()).decode(),
                 "jpg_b64": base64.b64encode(jpg_data).decode(),
             }
-        return None
+            if png_data:
+                item["png_name"] = f"{safe_name}_{suffix}.png"
+                item["png_b64"] = base64.b64encode(png_data).decode()
+            return [item]
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         items = list(enumerate(files_data))
         results_raw = executor.map(_proc_item, items)
 
-    results = [r for r in results_raw if r is not None]
+    results = []
+    for r in results_raw:
+        if r:
+            results.extend(r)
     return results
 
 
@@ -244,15 +269,19 @@ async def freepik_vectorize_endpoint(
     invert: str = Form("false"),
     mode: str = Form("monochrome"),
     numColors: int = Form(4),
-    creator: str = Form("peripirdaus")
+    creator: str = Form("peripirdaus"),
+    splitGrid: str = Form("false")
 ):
     try:
         inv = str_to_bool(invert)
+        split_g = str_to_bool(splitGrid)
         files_data = [(f.filename, await f.read()) for f in files]
         
-        results = await asyncio.to_thread(_sync_freepik_batch, files_data, threshold, inv, mode, numColors, creator)
+        results = await asyncio.to_thread(_sync_freepik_batch, files_data, threshold, inv, mode, numColors, creator, split_g)
         if not results:
             raise HTTPException(status_code=400, detail="Tidak ada ikon yang terdeteksi untuk Freepik.")
+
+        return {"files": results}
 
         return {"files": results}
     except HTTPException:
