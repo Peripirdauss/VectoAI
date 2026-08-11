@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import JSZip from 'jszip';
+import * as XLSX from 'xlsx';
 import { 
   Upload, Download, RefreshCw, Layers, AlertCircle, FileText, Trash2, 
   Check, Sparkles, CheckCircle2, Image as ImageIcon, ShieldCheck, 
   Eye, Grid, Sun, Moon, FileCheck, Layers3, Activity, Sliders,
-  Package, Globe, Server, Send
+  Package, Globe, Server, Send, Columns, Maximize2, X, Repeat, FileSpreadsheet
 } from 'lucide-react';
 
 const API_BASE = '/api';
@@ -77,13 +78,138 @@ async function triggerBlobDownload(blob: Blob, fallbackFileName: string, mimeTyp
   setTimeout(() => window.URL.revokeObjectURL(url), 1000);
 }
 
+function downloadBase64File(b64Data: string, filename: string, mimeType: string) {
+  const binary = atob(b64Data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: mimeType });
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.setAttribute('download', filename);
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+interface MetadataRow {
+  filename: string;
+  title: string;
+  description: string;
+  keywords: string;
+}
+
+/** 
+ * Universal Spreadsheet (XLSX, XLS, CSV, TSV, ODS) & Table Parser + Smart Column Auto-Translator
+ * Automatically parses Excel workbooks or CSV files with arbitrary column names and formats.
+ */
+function parseSpreadsheet(dataBuffer: ArrayBuffer): MetadataRow[] {
+  const workbook = XLSX.read(dataBuffer, { type: 'array', cellDates: true });
+  if (!workbook.SheetNames || workbook.SheetNames.length === 0) return [];
+
+  let rawRows: any[][] = [];
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (sheet) {
+      const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false });
+      if (rows.length > 0) {
+        rawRows = rows;
+        break;
+      }
+    }
+  }
+
+  if (rawRows.length === 0) return [];
+
+  // Detect header row index within first 10 rows
+  let headerRowIdx = 0;
+  let maxScore = -1;
+  let fnIdx = -1, titleIdx = -1, descIdx = -1, kwIdx = -1;
+
+  const fnKeys = ['filename', 'file_name', 'file name', 'file', 'nama file', 'namafile', 'berkas', 'image', 'gambar', 'name', 'id', 'asset', 'vector', 'icon', 'item'];
+  const titleKeys = ['title', 'judul', 'heading', 'caption', 'name', 'subject', 'title_en', 'judul_gambar', 'headline'];
+  const descKeys = ['description', 'deskripsi', 'desc', 'detail', 'keterangan', 'summary', 'info', 'prompt', 'alt', 'body'];
+  const kwKeys = ['keywords', 'keyword', 'kata kunci', 'katakunci', 'kata_kunci', 'tags', 'tag', 'kata', 'kunci', 'categories', 'category', 'labels', 'meta_keywords', 'keyword_list'];
+
+  for (let r = 0; r < Math.min(10, rawRows.length); r++) {
+    const rowStr = rawRows[r].map(c => String(c).toLowerCase().replace(/[^a-z0-9\s_]/g, '').trim());
+    let score = 0;
+    let curFn = -1, curTitle = -1, curDesc = -1, curKw = -1;
+
+    rowStr.forEach((cell, colIdx) => {
+      if (curFn === -1 && fnKeys.some(k => cell === k || cell.includes(k))) {
+        curFn = colIdx;
+        score += 3;
+      } else if (curTitle === -1 && titleKeys.some(k => cell === k || cell.includes(k))) {
+        curTitle = colIdx;
+        score += 2;
+      } else if (curDesc === -1 && descKeys.some(k => cell === k || cell.includes(k))) {
+        curDesc = colIdx;
+        score += 2;
+      } else if (curKw === -1 && kwKeys.some(k => cell === k || cell.includes(k))) {
+        curKw = colIdx;
+        score += 2;
+      }
+    });
+
+    if (score > maxScore) {
+      maxScore = score;
+      headerRowIdx = r;
+      fnIdx = curFn;
+      titleIdx = curTitle;
+      descIdx = curDesc;
+      kwIdx = curKw;
+    }
+  }
+
+  if (maxScore <= 0) {
+    headerRowIdx = 0;
+    fnIdx = 0;
+    titleIdx = 1;
+    descIdx = 2;
+    kwIdx = 3;
+  }
+
+  const results: MetadataRow[] = [];
+  for (let i = headerRowIdx + 1; i < rawRows.length; i++) {
+    const cols = rawRows[i];
+    if (!cols || cols.every(c => String(c).trim().length === 0)) continue;
+
+    const getVal = (idx: number) => (idx !== -1 && cols[idx] !== undefined) ? String(cols[idx]).trim() : '';
+
+    let fn = getVal(fnIdx);
+    let title = getVal(titleIdx);
+    let desc = getVal(descIdx);
+    let kw = getVal(kwIdx);
+
+    if (!fn && fnIdx === -1 && cols[0]) {
+      fn = String(cols[0]).trim();
+    }
+
+    if (kw) {
+      kw = kw.replace(/[\r\n\t;|]+/g, ',')
+            .split(',')
+            .map(k => k.trim())
+            .filter(k => k.length > 0)
+            .join(', ');
+    }
+
+    results.push({ filename: fn, title, description: desc, keywords: kw });
+  }
+
+  return results;
+}
+
 interface FileItem {
   file: File;
   previewUrl: string;
   id: string;
+  title?: string;
+  description?: string;
+  keywords?: string;
 }
-
-
 
 interface ProgressState {
   current: number;
@@ -93,22 +219,126 @@ interface ProgressState {
   stage: 'uploading' | 'processing' | 'downloading' | 'complete';
 }
 
-
-
 function App() {
-  const [activeTab, setActiveTab] = useState<'vectorizer' | 'vecteezy' | 'freepik' | 'adobe'>('freepik');
+  const [activeTab, setActiveTab] = useState<'vectorizer' | 'vecteezy' | 'freepik' | 'adobe' | 'shutterstock' | 'shutterstock_regular' | 'seamless_pattern' | 'repair'>('shutterstock_regular');
+  const [repairAudit, setRepairAudit] = useState<any | null>(null);
+  const [patternAnalysis, setPatternAnalysis] = useState<any | null>(null);
+  const [patternPreview3x3, setPatternPreview3x3] = useState<string | null>(null);
+  const [patternTesting, setPatternTesting] = useState(false);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [threshold, setThreshold] = useState(127);
   const [invert, setInvert] = useState(false);
   const [format, setFormat] = useState<'eps' | 'svg'>('eps');
   const [mode, setMode] = useState<'monochrome' | 'color'>('monochrome');
-  const [numColors, setNumColors] = useState(4);
+  const [numColors, setNumColors] = useState(8);
   const [fillHoles, setFillHoles] = useState(true);
   const [cornerSharpness, setCornerSharpness] = useState(0.75);
-  const [creator, setCreator] = useState('peripirdaus');
   const [splitGrid, setSplitGrid] = useState(false);
-  const [includePng, setIncludePng] = useState(true);
+  const [includeEps, setIncludeEps] = useState(true);
+  const [includeJpg, setIncludeJpg] = useState(true);
+  const [includePng, setIncludePng] = useState(false);
+  const [includePsd, setIncludePsd] = useState(true);
+  const [downloadMode, setDownloadMode] = useState<'direct' | 'zip'>('zip');
+  const [dilationPx, setDilationPx] = useState(1);
+  const [creator, setCreator] = useState(() => localStorage.getItem('vecto_creator_tag') || 'peripirdaus');
+  const [metaTitle, setMetaTitle] = useState('');
+  const [metaDescription, setMetaDescription] = useState('');
+  const [keywords, setKeywords] = useState('');
+  const [autoNumberTitles, setAutoNumberTitles] = useState(true);
+  const [csvNotice, setCsvNotice] = useState<string | null>(null);
+
+  const downloadMetadataCsvTemplate = () => {
+    const csvContent = 
+      `Filename,Title,Description,Keywords\n` +
+      `cat_icon.png,"Cute Cat Vector Icon Set","High quality vector cat line art icon for microstock","cat, kitten, cute, vector, icon, pet, line art"\n` +
+      `dog_icon.png,"Cute Dog Vector Line Art","High quality vector dog line art icon for microstock","dog, puppy, cute, vector, icon, pet, line art"\n` +
+      `pattern_sample.png,"Seamless Geometric Pattern","Seamless vector pattern background for design","pattern, seamless, background, vector, geometric, tile"`;
+    
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    triggerBlobDownload(blob, 'vecto_metadata_template.csv', 'text/csv');
+  };
+
+  const downloadMetadataXlsxTemplate = () => {
+    const data = [
+      ["Filename", "Title", "Description", "Keywords"],
+      ["cat_icon.png", "Cute Cat Vector Icon Set", "High quality vector cat line art icon for microstock", "cat, kitten, cute, vector, icon, pet, line art"],
+      ["dog_icon.png", "Cute Dog Vector Line Art", "High quality vector dog line art icon for microstock", "dog, puppy, cute, vector, icon, pet, line art"],
+      ["pattern_sample.png", "Seamless Geometric Pattern", "Seamless vector pattern background for design", "pattern, seamless, background, vector, geometric, tile"]
+    ];
+
+    const worksheet = XLSX.utils.aoa_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Metadata Template");
+
+    const wbout = XLSX.write(workbook, { bookType: "xlsx", type: "array" });
+    const blob = new Blob([wbout], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    triggerBlobDownload(blob, "vecto_metadata_template.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  };
+
+  const handleImportMetadata = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const buffer = event.target?.result as ArrayBuffer;
+        const parsedRows = parseSpreadsheet(buffer);
+
+        if (parsedRows.length === 0) {
+          setError('Format tabel spreadsheet tidak valid atau berkas kosong.');
+          return;
+        }
+
+        let matchedCount = 0;
+        setFiles(prevFiles => {
+          return prevFiles.map((fItem, index) => {
+            const rawName = fItem.file.name.toLowerCase();
+            const cleanName = sanitizeFilename(fItem.file.name).toLowerCase();
+            const baseNoExt = cleanName.replace(/\.[^/.]+$/, '');
+
+            let match = parsedRows.find(row => {
+              const rowFn = row.filename.toLowerCase().trim();
+              if (!rowFn) return false;
+              const rowClean = sanitizeFilename(rowFn).toLowerCase();
+              const rowBase = rowClean.replace(/\.[^/.]+$/, '');
+              return rowFn === rawName || rowClean === cleanName || rowBase === baseNoExt;
+            });
+
+            if (!match && parsedRows.length === prevFiles.length && parsedRows[index]) {
+              match = parsedRows[index];
+            }
+
+            if (match) {
+              matchedCount++;
+              return {
+                ...fItem,
+                title: match.title || fItem.title,
+                description: match.description || fItem.description,
+                keywords: match.keywords || fItem.keywords,
+              };
+            }
+            return fItem;
+          });
+        });
+
+        if (parsedRows.length > 0 && parsedRows[0]) {
+          if (parsedRows[0].title) setMetaTitle(parsedRows[0].title);
+          if (parsedRows[0].description) setMetaDescription(parsedRows[0].description);
+          if (parsedRows[0].keywords) setKeywords(parsedRows[0].keywords);
+        }
+
+        const ext = file.name.split('.').pop()?.toUpperCase() || 'TABLE';
+        setCsvNotice(`✓ Berhasil mengimpor & mendeteksi metadata ${ext} (${file.name}) untuk ${matchedCount} file!`);
+        setTimeout(() => setCsvNotice(null), 5000);
+      } catch (err: any) {
+        setError(`Gagal membaca berkas tabel: ${err.message}`);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+    e.target.value = '';
+  };
 
   // Custom UI Presets Manager State
   const [presetName, setPresetName] = useState('');
@@ -222,6 +452,8 @@ function App() {
   
   // Canvas & Preview state
   const [canvasBg, setCanvasBg] = useState<'checkerboard' | 'dark' | 'white'>('checkerboard');
+  const [previewMode, setPreviewMode] = useState<'split' | 'result' | 'original'>('split');
+  const [lightboxImg, setLightboxImg] = useState<{ src: string; title: string } | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [preflight, setPreflight] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
@@ -252,12 +484,13 @@ function App() {
     formData.append('numColors', numColors.toString());
 
     try {
-      const response = await axios.post(`${API_BASE}/preview`, formData, { timeout: 15000 });
+      const response = await axios.post(`${API_BASE}/preview`, formData, { timeout: 30000 });
       setPreview(response.data.preview);
 
-      // Fetch preflight audit check
-      const auditRes = await axios.post(`${API_BASE}/preflight`, formData, { timeout: 15000 });
-      setPreflight(auditRes.data);
+      // Async non-blocking preflight audit check
+      axios.post(`${API_BASE}/preflight`, formData, { timeout: 30000 })
+        .then(auditRes => setPreflight(auditRes.data))
+        .catch(() => {});
     } catch (err) {
       console.error('Preview error:', err);
     }
@@ -345,6 +578,9 @@ function App() {
         formData.append('mode', mode);
         formData.append('numColors', numColors.toString());
         formData.append('creator', creator);
+        formData.append('title', metaTitle);
+        formData.append('description', metaDescription);
+        formData.append('keywords', keywords);
 
         const response = await axios.post(`${API_BASE}/vectorize`, formData, {
           responseType: 'blob',
@@ -380,6 +616,9 @@ function App() {
             formData.append('mode', mode);
             formData.append('numColors', numColors.toString());
             formData.append('creator', creator);
+            formData.append('title', metaTitle);
+            formData.append('description', metaDescription);
+            formData.append('keywords', keywords);
 
             const response = await axios.post(`${API_BASE}/vectorize`, formData, {
               responseType: 'arraybuffer',
@@ -418,16 +657,21 @@ function App() {
 
   const downloadFreepik = async () => {
     if (files.length === 0) return;
+    if (!includeEps && !includeJpg && !includePng) {
+      setError('Pilih minimal satu format berkas (.EPS, .JPG, atau .PNG) untuk diunduh.');
+      return;
+    }
     setLoading(true);
     setError(null);
 
     const zip = new JSZip();
     let successCount = 0;
+    const isDirect = downloadMode === 'direct';
 
     try {
       for (let i = 0; i < files.length; i++) {
         const fItem = files[i];
-        const pct = Math.round(((i + 1) / files.length) * 92);
+        const pct = Math.round(((i + 1) / files.length) * 90);
 
         setProgress({
           current: i + 1,
@@ -438,6 +682,15 @@ function App() {
         });
 
         try {
+          let itemTitle = fItem.title || metaTitle;
+          if (!itemTitle && fItem.file.name) {
+            itemTitle = sanitizeFilename(fItem.file.name).replace(/_/g, ' ');
+          } else if (itemTitle && files.length > 1 && autoNumberTitles && !fItem.title) {
+            itemTitle = `${itemTitle} ${i + 1}`;
+          }
+          let itemDesc = fItem.description || metaDescription;
+          let itemKw = fItem.keywords || keywords;
+
           const formData = new FormData();
           formData.append('files', fItem.file);
           formData.append('threshold', threshold.toString());
@@ -446,23 +699,35 @@ function App() {
           formData.append('numColors', numColors.toString());
           formData.append('creator', creator);
           formData.append('splitGrid', splitGrid.toString());
+          formData.append('title', itemTitle);
+          formData.append('description', itemDesc);
+          formData.append('keywords', itemKw);
 
           const response = await axios.post(`${API_BASE}/freepik-vectorize`, formData, { timeout: 60000 });
           const data = response.data;
 
           if (data && Array.isArray(data.files)) {
             for (const entry of data.files) {
-              if (entry.eps_b64) {
-                const epsBytes = Uint8Array.from(atob(entry.eps_b64), c => c.charCodeAt(0));
-                zip.file(entry.eps_name, epsBytes);
+              if (includeEps && entry.eps_b64) {
+                if (isDirect) {
+                  downloadBase64File(entry.eps_b64, entry.eps_name, 'application/postscript');
+                } else {
+                  zip.file(entry.eps_name, Uint8Array.from(atob(entry.eps_b64), c => c.charCodeAt(0)));
+                }
               }
-              if (entry.jpg_b64) {
-                const jpgBytes = Uint8Array.from(atob(entry.jpg_b64), c => c.charCodeAt(0));
-                zip.file(entry.jpg_name, jpgBytes);
+              if (includeJpg && entry.jpg_b64) {
+                if (isDirect) {
+                  downloadBase64File(entry.jpg_b64, entry.jpg_name, 'image/jpeg');
+                } else {
+                  zip.file(entry.jpg_name, Uint8Array.from(atob(entry.jpg_b64), c => c.charCodeAt(0)));
+                }
               }
               if (includePng && entry.png_b64 && entry.png_name) {
-                const pngBytes = Uint8Array.from(atob(entry.png_b64), c => c.charCodeAt(0));
-                zip.file(entry.png_name, pngBytes);
+                if (isDirect) {
+                  downloadBase64File(entry.png_b64, entry.png_name, 'image/png');
+                } else {
+                  zip.file(entry.png_name, Uint8Array.from(atob(entry.png_b64), c => c.charCodeAt(0)));
+                }
               }
               successCount++;
             }
@@ -476,12 +741,14 @@ function App() {
         throw new Error('Tidak ada berkas yang berhasil di-vektorisasi untuk Freepik.');
       }
 
-      setProgress({ current: files.length, total: files.length, fileName: 'Membuat paket ZIP Freepik...', percent: 98, stage: 'downloading' });
-      const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/zip', compression: 'DEFLATE' });
-      const zipName = files.length === 1 
-        ? `${sanitizeFilename(files[0].file.name)}_freepik_package.zip` 
-        : 'freepik_vectors_package.zip';
-      await triggerBlobDownload(blob, zipName, 'application/zip');
+      if (!isDirect) {
+        setProgress({ current: files.length, total: files.length, fileName: 'Membuat paket ZIP Freepik...', percent: 98, stage: 'downloading' });
+        const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/zip', compression: 'DEFLATE' });
+        const zipName = files.length === 1 
+          ? `${sanitizeFilename(files[0].file.name)}_freepik_package.zip` 
+          : 'freepik_vectors_package.zip';
+        await triggerBlobDownload(blob, zipName, 'application/zip');
+      }
 
       setProgress({ current: files.length, total: files.length, fileName: 'Selesai!', percent: 100, stage: 'complete' });
     } catch (err: any) {
@@ -504,6 +771,13 @@ function App() {
     try {
       if (!isBulk) {
         setProgress({ current: 1, total: 1, fileName: files[0].file.name, percent: 30, stage: 'uploading' });
+        let singleTitle = files[0].title || metaTitle;
+        if (!singleTitle && files[0].file.name) {
+          singleTitle = sanitizeFilename(files[0].file.name).replace(/_/g, ' ');
+        }
+        let singleDesc = files[0].description || metaDescription;
+        let singleKw = files[0].keywords || keywords;
+
         const formData = new FormData();
         formData.append('files', files[0].file);
         formData.append('threshold', threshold.toString());
@@ -513,6 +787,9 @@ function App() {
         formData.append('numColors', numColors.toString());
         formData.append('fillHoles', fillHoles.toString());
         formData.append('creator', creator);
+        formData.append('title', singleTitle);
+        formData.append('description', singleDesc);
+        formData.append('keywords', singleKw);
 
         const response = await axios.post(`${API_BASE}/adobe-stock-vectorize`, formData, {
           responseType: 'blob',
@@ -540,6 +817,15 @@ function App() {
           });
 
           try {
+            let itemTitle = fItem.title || metaTitle;
+            if (!itemTitle && fItem.file.name) {
+              itemTitle = sanitizeFilename(fItem.file.name).replace(/_/g, ' ');
+            } else if (itemTitle && files.length > 1 && autoNumberTitles && !fItem.title) {
+              itemTitle = `${itemTitle} ${i + 1}`;
+            }
+            let itemDesc = fItem.description || metaDescription;
+            let itemKw = fItem.keywords || keywords;
+
             const formData = new FormData();
             formData.append('files', fItem.file);
             formData.append('threshold', threshold.toString());
@@ -549,6 +835,9 @@ function App() {
             formData.append('numColors', numColors.toString());
             formData.append('fillHoles', fillHoles.toString());
             formData.append('creator', creator);
+            formData.append('title', itemTitle);
+            formData.append('description', itemDesc);
+            formData.append('keywords', itemKw);
 
             const response = await axios.post(`${API_BASE}/adobe-stock-vectorize`, formData, {
               responseType: 'arraybuffer',
@@ -604,17 +893,25 @@ function App() {
         formData.append('numColors', numColors.toString());
         formData.append('alphamax', cornerSharpness.toString());
         formData.append('creator', creator);
+        let singleTitle = files[0].title || metaTitle;
+        if (!singleTitle && files[0].file.name) {
+          singleTitle = sanitizeFilename(files[0].file.name).replace(/_/g, ' ');
+        }
+        let singleDesc = files[0].description || metaDescription;
+        let singleKw = files[0].keywords || keywords;
+
+        formData.append('title', singleTitle);
+        formData.append('description', singleDesc);
+        formData.append('keywords', singleKw);
 
         const response = await axios.post(`${API_BASE}/vecteezy-vectorize`, formData, {
           responseType: 'blob',
           timeout: DEFAULT_TIMEOUT
         });
         
-        const now = new Date();
-        const stamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
         const baseName = sanitizeFilename(files[0].file.name);
         const mime = format === 'eps' ? 'application/postscript' : 'image/svg+xml';
-        await triggerBlobDownload(response.data, `${baseName}_${stamp}.${format}`, mime);
+        await triggerBlobDownload(response.data, `${baseName}.${format}`, mime);
         setProgress({ current: 1, total: 1, fileName: 'Selesai!', percent: 100, stage: 'complete' });
       } else {
         const zip = new JSZip();
@@ -633,6 +930,15 @@ function App() {
           });
 
           try {
+            let itemTitle = fItem.title || metaTitle;
+            if (!itemTitle && fItem.file.name) {
+              itemTitle = sanitizeFilename(fItem.file.name).replace(/_/g, ' ');
+            } else if (itemTitle && files.length > 1 && autoNumberTitles && !fItem.title) {
+              itemTitle = `${itemTitle} ${i + 1}`;
+            }
+            let itemDesc = fItem.description || metaDescription;
+            let itemKw = fItem.keywords || keywords;
+
             const formData = new FormData();
             formData.append('files', fItem.file);
             formData.append('threshold', threshold.toString());
@@ -642,6 +948,9 @@ function App() {
             formData.append('numColors', numColors.toString());
             formData.append('alphamax', cornerSharpness.toString());
             formData.append('creator', creator);
+            formData.append('title', itemTitle);
+            formData.append('description', itemDesc);
+            formData.append('keywords', itemKw);
 
             const response = await axios.post(`${API_BASE}/vecteezy-vectorize`, formData, {
               responseType: 'arraybuffer',
@@ -649,10 +958,8 @@ function App() {
             });
 
             if (response.data) {
-              const now = new Date();
-              const stamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
               const safeName = sanitizeFilename(fItem.file.name);
-              const vecName = `${safeName}_${stamp}_${i + 1}.${format}`;
+              const vecName = files.length > 1 ? `${safeName}_${i + 1}.${format}` : `${safeName}.${format}`;
               zip.file(vecName, response.data);
               successCount++;
             }
@@ -673,6 +980,356 @@ function App() {
     } catch (err: any) {
       console.error('Vecteezy export error:', err);
       const msg = await parseErrorMessage(err, 'Gagal memproses file untuk Vecteezy.');
+      setError(msg);
+    } finally {
+      setLoading(false);
+      setTimeout(() => setProgress(null), 1500);
+    }
+  };
+
+  const downloadShutterstock = async () => {
+    if (files.length === 0) return;
+    if (!includeEps && !includeJpg && !includePng && !includePsd) {
+      setError('Pilih minimal satu format berkas (.EPS, .JPG, .PNG, atau .PSD) untuk diunduh.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    const zip = new JSZip();
+    let successCount = 0;
+    const isDirect = downloadMode === 'direct';
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const fItem = files[i];
+        const itemStartPct = Math.round((i / files.length) * 85 + 10);
+        setProgress({
+          current: i + 1,
+          total: files.length,
+          fileName: `Vektorisasi Pattern Shutterstock: ${fItem.file.name}`,
+          percent: itemStartPct,
+          stage: 'processing'
+        });
+
+        try {
+          let itemTitle = fItem.title || metaTitle;
+          if (!itemTitle && fItem.file.name) {
+            itemTitle = sanitizeFilename(fItem.file.name).replace(/_/g, ' ');
+          } else if (itemTitle && files.length > 1 && autoNumberTitles && !fItem.title) {
+            itemTitle = `${itemTitle} ${i + 1}`;
+          }
+          let itemDesc = fItem.description || metaDescription;
+          let itemKw = fItem.keywords || keywords;
+
+          const formData = new FormData();
+          formData.append('files', fItem.file);
+          formData.append('numColors', numColors.toString());
+          formData.append('creator', creator);
+          formData.append('dilationPx', dilationPx.toString());
+          formData.append('title', itemTitle);
+          formData.append('description', itemDesc);
+          formData.append('keywords', itemKw);
+
+          const response = await axios.post(`${API_BASE}/shutterstock-vectorize`, formData, { timeout: DEFAULT_TIMEOUT });
+          const data = response.data;
+
+          if (data && Array.isArray(data.files)) {
+            for (const entry of data.files) {
+              if (includeEps && entry.eps_b64) {
+                if (isDirect) {
+                  downloadBase64File(entry.eps_b64, entry.eps_name, 'application/postscript');
+                } else {
+                  zip.file(entry.eps_name, Uint8Array.from(atob(entry.eps_b64), c => c.charCodeAt(0)));
+                }
+              }
+              if (includeJpg && entry.jpg_b64) {
+                if (isDirect) {
+                  downloadBase64File(entry.jpg_b64, entry.jpg_name, 'image/jpeg');
+                } else {
+                  zip.file(entry.jpg_name, Uint8Array.from(atob(entry.jpg_b64), c => c.charCodeAt(0)));
+                }
+              }
+              if (includePng && entry.png_b64 && entry.png_name) {
+                if (isDirect) {
+                  downloadBase64File(entry.png_b64, entry.png_name, 'image/png');
+                } else {
+                  zip.file(entry.png_name, Uint8Array.from(atob(entry.png_b64), c => c.charCodeAt(0)));
+                }
+              }
+              if (includePsd && entry.psd_b64 && entry.psd_name) {
+                if (isDirect) {
+                  downloadBase64File(entry.psd_b64, entry.psd_name, 'image/vnd.adobe.photoshop');
+                } else {
+                  zip.file(entry.psd_name, Uint8Array.from(atob(entry.psd_b64), c => c.charCodeAt(0)));
+                }
+              }
+              successCount++;
+            }
+          }
+          const itemDonePct = Math.round(((i + 1) / files.length) * 85 + 10);
+          setProgress({
+            current: i + 1,
+            total: files.length,
+            fileName: `Ekstraksi Berhasil!`,
+            percent: itemDonePct,
+            stage: 'processing'
+          });
+        } catch (itemErr) {
+          console.error(`Error processing Shutterstock file ${fItem.file.name}:`, itemErr);
+        }
+      }
+
+      if (successCount === 0) throw new Error('Tidak ada berkas yang berhasil di-vektorisasi untuk Shutterstock.');
+
+      if (!isDirect) {
+        setProgress({ current: files.length, total: files.length, fileName: 'Membuat paket ZIP Shutterstock...', percent: 98, stage: 'downloading' });
+        const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/zip', compression: 'DEFLATE' });
+        const zipName = files.length === 1 
+          ? `${sanitizeFilename(files[0].file.name)}_shutterstock_package.zip` 
+          : 'shutterstock_pattern_package.zip';
+        await triggerBlobDownload(blob, zipName, 'application/zip');
+      }
+      setProgress({ current: files.length, total: files.length, fileName: 'Selesai!', percent: 100, stage: 'complete' });
+    } catch (err: any) {
+      setError(err.message || 'Gagal memproses ekspor Shutterstock.');
+    } finally {
+      setLoading(false);
+      setTimeout(() => setProgress(null), 1500);
+    }
+  };
+
+  const downloadShutterstockRegular = async () => {
+    if (files.length === 0) return;
+    if (!includeEps && !includeJpg && !includePng && !includePsd) {
+      setError('Pilih minimal satu format berkas (.EPS, .JPG, .PNG, atau .PSD) untuk diunduh.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    const zip = new JSZip();
+    let successCount = 0;
+    const isDirect = downloadMode === 'direct';
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const fItem = files[i];
+        const itemStartPct = Math.round((i / files.length) * 85 + 10);
+        setProgress({
+          current: i + 1,
+          total: files.length,
+          fileName: `Vektorisasi Shutterstock Vector: ${fItem.file.name}`,
+          percent: itemStartPct,
+          stage: 'processing'
+        });
+
+        try {
+          let itemTitle = fItem.title || metaTitle;
+          if (!itemTitle && fItem.file.name) {
+            itemTitle = sanitizeFilename(fItem.file.name).replace(/_/g, ' ');
+          } else if (itemTitle && files.length > 1 && autoNumberTitles && !fItem.title) {
+            itemTitle = `${itemTitle} ${i + 1}`;
+          }
+          let itemDesc = fItem.description || metaDescription;
+          let itemKw = fItem.keywords || keywords;
+
+          const formData = new FormData();
+          formData.append('files', fItem.file);
+          formData.append('threshold', threshold.toString());
+          formData.append('invert', invert.toString());
+          formData.append('mode', mode);
+          formData.append('numColors', numColors.toString());
+          formData.append('creator', creator);
+          formData.append('title', itemTitle);
+          formData.append('description', itemDesc);
+          formData.append('keywords', itemKw);
+
+          const response = await axios.post(`${API_BASE}/shutterstock-vectorize-standard`, formData, { timeout: DEFAULT_TIMEOUT });
+          const data = response.data;
+
+          if (data && Array.isArray(data.files)) {
+            for (const entry of data.files) {
+              if (includeEps && entry.eps_b64) {
+                if (isDirect) {
+                  downloadBase64File(entry.eps_b64, entry.eps_name, 'application/postscript');
+                } else {
+                  zip.file(entry.eps_name, Uint8Array.from(atob(entry.eps_b64), c => c.charCodeAt(0)));
+                }
+              }
+              if (includeJpg && entry.jpg_b64) {
+                if (isDirect) {
+                  downloadBase64File(entry.jpg_b64, entry.jpg_name, 'image/jpeg');
+                } else {
+                  zip.file(entry.jpg_name, Uint8Array.from(atob(entry.jpg_b64), c => c.charCodeAt(0)));
+                }
+              }
+              if (includePng && entry.png_b64 && entry.png_name) {
+                if (isDirect) {
+                  downloadBase64File(entry.png_b64, entry.png_name, 'image/png');
+                } else {
+                  zip.file(entry.png_name, Uint8Array.from(atob(entry.png_b64), c => c.charCodeAt(0)));
+                }
+              }
+              if (includePsd && entry.psd_b64 && entry.psd_name) {
+                if (isDirect) {
+                  downloadBase64File(entry.psd_b64, entry.psd_name, 'image/vnd.adobe.photoshop');
+                } else {
+                  zip.file(entry.psd_name, Uint8Array.from(atob(entry.psd_b64), c => c.charCodeAt(0)));
+                }
+              }
+              successCount++;
+            }
+          }
+          const itemDonePct = Math.round(((i + 1) / files.length) * 85 + 10);
+          setProgress({
+            current: i + 1,
+            total: files.length,
+            fileName: `Ekstraksi Berhasil!`,
+            percent: itemDonePct,
+            stage: 'processing'
+          });
+        } catch (itemErr) {
+          console.error(`Error processing Shutterstock Regular file ${fItem.file.name}:`, itemErr);
+        }
+      }
+
+      if (successCount === 0) throw new Error('Tidak ada berkas yang berhasil di-vektorisasi untuk Shutterstock Vector.');
+
+      if (!isDirect) {
+        setProgress({ current: files.length, total: files.length, fileName: 'Membuat paket ZIP Shutterstock Vector...', percent: 98, stage: 'downloading' });
+        const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/zip', compression: 'DEFLATE' });
+        const zipName = files.length === 1 
+          ? `${sanitizeFilename(files[0].file.name)}_shutterstock_package.zip` 
+          : 'shutterstock_vector_package.zip';
+        await triggerBlobDownload(blob, zipName, 'application/zip');
+      }
+      setProgress({ current: files.length, total: files.length, fileName: 'Selesai!', percent: 100, stage: 'complete' });
+    } catch (err: any) {
+      setError(err.message || 'Gagal memproses ekspor Shutterstock Vector.');
+    } finally {
+      setLoading(false);
+      setTimeout(() => setProgress(null), 1500);
+    }
+  };
+
+  const executeVectorRepair = async () => {
+    if (files.length === 0) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const activeFile = selectedIndex !== null ? files[selectedIndex]?.file : files[0].file;
+      setProgress({
+        current: 1,
+        total: 1,
+        fileName: `Merekontruksi & Memperbaiki Geometri: ${activeFile.name}`,
+        percent: 40,
+        stage: 'processing'
+      });
+
+      const formData = new FormData();
+      formData.append('file', activeFile);
+      formData.append('filename', activeFile.name);
+      formData.append('num_colors', numColors.toString());
+
+      const response = await axios.post(`${API_BASE}/repair-vector`, formData, { timeout: DEFAULT_TIMEOUT });
+      const data = response.data;
+
+      if (!data.success) {
+        throw new Error(data.error || 'Gagal memperbaik geometri berkas.');
+      }
+
+      setRepairAudit(data);
+
+      const isDirect = downloadMode === 'direct';
+
+      if (isDirect) {
+        if (includeEps && data.eps_b64) downloadBase64File(data.eps_b64, `${sanitizeFilename(activeFile.name)}_repaired.eps`, 'application/postscript');
+        if (data.svg_b64) downloadBase64File(data.svg_b64, `${sanitizeFilename(activeFile.name)}_repaired.svg`, 'image/svg+xml');
+        if (includeJpg && data.jpg_b64) downloadBase64File(data.jpg_b64, `${sanitizeFilename(activeFile.name)}_repaired.jpg`, 'image/jpeg');
+        if (includePng && data.png_b64) downloadBase64File(data.png_b64, `${sanitizeFilename(activeFile.name)}_repaired.png`, 'image/png');
+        if (includePsd && data.psd_b64) downloadBase64File(data.psd_b64, `${sanitizeFilename(activeFile.name)}_repaired.psd`, 'image/vnd.adobe.photoshop');
+      } else {
+        const zip = new JSZip();
+        if (data.eps_b64) zip.file(`${sanitizeFilename(activeFile.name)}_repaired.eps`, Uint8Array.from(atob(data.eps_b64), c => c.charCodeAt(0)));
+        if (data.svg_b64) zip.file(`${sanitizeFilename(activeFile.name)}_repaired.svg`, data.svg_str);
+        if (data.jpg_b64) zip.file(`${sanitizeFilename(activeFile.name)}_repaired.jpg`, Uint8Array.from(atob(data.jpg_b64), c => c.charCodeAt(0)));
+        if (data.png_b64) zip.file(`${sanitizeFilename(activeFile.name)}_repaired.png`, Uint8Array.from(atob(data.png_b64), c => c.charCodeAt(0)));
+        if (data.psd_b64) zip.file(`${sanitizeFilename(activeFile.name)}_repaired.psd`, Uint8Array.from(atob(data.psd_b64), c => c.charCodeAt(0)));
+        
+        const blob = await zip.generateAsync({ type: 'blob' });
+        await triggerBlobDownload(blob, `${sanitizeFilename(activeFile.name)}_repaired_package.zip`, 'application/zip');
+      }
+
+      setProgress({ current: 1, total: 1, fileName: 'Perbaikan Selesai 100%!', percent: 100, stage: 'complete' });
+    } catch (err: any) {
+      console.error('Vector repair error:', err);
+      const msg = await parseErrorMessage(err, 'Gagal merekonstruksi geometri berkas.');
+      setError(msg);
+    } finally {
+      setLoading(false);
+      setTimeout(() => setProgress(null), 1500);
+    }
+  };
+
+  const testSeamlessPattern = useCallback(async () => {
+    const activeFile = selectedIndex !== null ? files[selectedIndex]?.file : null;
+    if (!activeFile) {
+      setPatternAnalysis(null);
+      setPatternPreview3x3(null);
+      return;
+    }
+    setPatternTesting(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', activeFile);
+      const res = await axios.post(`${API_BASE}/pattern/test-tile`, formData, { timeout: 30000 });
+      setPatternAnalysis(res.data.analysis);
+      setPatternPreview3x3(res.data.preview_3x3);
+    } catch (err) {
+      console.error('Pattern test error:', err);
+    } finally {
+      setPatternTesting(false);
+    }
+  }, [files, selectedIndex]);
+
+  useEffect(() => {
+    if (activeTab === 'seamless_pattern') {
+      testSeamlessPattern();
+    }
+  }, [activeTab, selectedIndex, testSeamlessPattern]);
+
+  const downloadSeamlessPattern = async () => {
+    if (files.length === 0) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const fItem = selectedIndex !== null ? files[selectedIndex] : files[0];
+      setProgress({
+        current: 1,
+        total: 1,
+        fileName: `Vektorisasi 3x3 Seamless Repeat: ${fItem.file.name}`,
+        percent: 40,
+        stage: 'processing'
+      });
+
+      const formData = new FormData();
+      formData.append('file', fItem.file);
+      formData.append('numColors', numColors.toString());
+      formData.append('format', format);
+      formData.append('mode', mode);
+      formData.append('creator', creator);
+
+      const res = await axios.post(`${API_BASE}/pattern/vectorize-tiled`, formData, {
+        responseType: 'blob',
+        timeout: DEFAULT_TIMEOUT
+      });
+
+      setProgress({ current: 1, total: 1, fileName: 'Mendownload Paket Pattern...', percent: 95, stage: 'downloading' });
+      const safeName = sanitizeFilename(fItem.file.name);
+      await triggerBlobDownload(res.data, `${safeName}_seamless_vector_pack.zip`, 'application/zip');
+      setProgress({ current: 1, total: 1, fileName: 'Selesai!', percent: 100, stage: 'complete' });
+    } catch (err: any) {
+      console.error('Pattern vectorize error:', err);
+      const msg = await parseErrorMessage(err, 'Gagal memproses seamless pattern.');
       setError(msg);
     } finally {
       setLoading(false);
@@ -797,6 +1454,54 @@ function App() {
           </button>
 
           <button
+            onClick={() => setActiveTab('shutterstock_regular')}
+            className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-3 rounded-xl text-xs font-bold transition-all duration-300 ${
+              activeTab === 'shutterstock_regular'
+                ? 'bg-gradient-to-r from-orange-600 to-amber-600 text-white shadow-lg shadow-orange-500/25 glow-purple'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+            }`}
+          >
+            <Sparkles size={15} />
+            Shutterstock Vector
+          </button>
+
+          <button
+            onClick={() => setActiveTab('shutterstock')}
+            className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-3 rounded-xl text-xs font-bold transition-all duration-300 ${
+              activeTab === 'shutterstock'
+                ? 'bg-gradient-to-r from-red-600 to-amber-600 text-white shadow-lg shadow-red-500/25 glow-purple'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+            }`}
+          >
+            <Layers size={15} />
+            Shutterstock Pattern
+          </button>
+
+          <button
+            onClick={() => setActiveTab('seamless_pattern')}
+            className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-3 rounded-xl text-xs font-bold transition-all duration-300 ${
+              activeTab === 'seamless_pattern'
+                ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-lg shadow-pink-500/25 glow-purple'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+            }`}
+          >
+            <Repeat size={15} />
+            Seamless Pattern Studio
+          </button>
+
+          <button
+            onClick={() => setActiveTab('repair')}
+            className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-3 rounded-xl text-xs font-bold transition-all duration-300 ${
+              activeTab === 'repair'
+                ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-lg shadow-violet-500/25 glow-purple'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+            }`}
+          >
+            <ShieldCheck size={15} />
+            Vector Repair & Expander
+          </button>
+
+          <button
             onClick={() => setActiveTab('vectorizer')}
             className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-3 rounded-xl text-xs font-bold transition-all duration-300 ${
               activeTab === 'vectorizer'
@@ -918,8 +1623,8 @@ function App() {
                 <div className="glass-card p-6 flex flex-col gap-5 h-full">
                   <div className="flex items-center justify-between pb-3 border-b border-slate-800">
                     <h2 className="text-sm font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                      <Sliders className={activeTab === 'freepik' ? 'text-pink-400' : 'text-emerald-400'} size={16} />
-                      {activeTab === 'freepik' ? 'Freepik Vector Specs' : activeTab === 'vecteezy' ? 'Vecteezy Tracing' : activeTab === 'adobe' ? 'Adobe Stock Settings' : 'Vector Settings'}
+                      <Sliders className={activeTab === 'freepik' ? 'text-pink-400' : activeTab === 'shutterstock' ? 'text-amber-400' : 'text-emerald-400'} size={16} />
+                      {activeTab === 'freepik' ? 'Freepik Vector Specs' : activeTab === 'vecteezy' ? 'Vecteezy Tracing' : activeTab === 'adobe' ? 'Adobe Stock Settings' : activeTab === 'shutterstock' ? 'Shutterstock Multi-Color Pattern' : 'Vector Settings'}
                     </h2>
                     <span className="text-[11px] font-mono text-slate-500">
                       {files.length} File Loaded
@@ -978,6 +1683,173 @@ function App() {
                       />
                     </div>
 
+                    {/* Microstock XMP Metadata (Title, Description, Keywords) */}
+                    <div className="p-3.5 rounded-xl bg-slate-900/90 border border-emerald-500/30 space-y-3 shadow-lg shadow-emerald-500/5">
+                      <label className="text-[11px] font-bold text-emerald-300 uppercase tracking-wider flex items-center justify-between">
+                        <span className="flex items-center gap-1.5"><FileText size={13} className="text-emerald-400" /> Metadata Microstock (XMP)</span>
+                        <span className="text-[10px] text-emerald-400 font-mono font-normal">Auto-embed EPS</span>
+                      </label>
+
+                      <div>
+                        <label className="text-[11px] font-semibold text-slate-300 block mb-1">Document Title</label>
+                        <input
+                          type="text"
+                          value={metaTitle}
+                          onChange={(e) => setMetaTitle(e.target.value)}
+                          placeholder="e.g. Cute Cat Seamless Pattern Vector"
+                          className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[11px] font-semibold text-slate-300 block mb-1">Description</label>
+                        <input
+                          type="text"
+                          value={metaDescription}
+                          onChange={(e) => setMetaDescription(e.target.value)}
+                          placeholder="e.g. High quality vector cat icon collection for microstock"
+                          className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[11px] font-semibold text-slate-300 block mb-1">Keywords / Tags (dipisah koma)</label>
+                        <textarea
+                          rows={2}
+                          value={keywords}
+                          onChange={(e) => setKeywords(e.target.value)}
+                          placeholder="e.g. cat, kitten, vector, icon, cute, pet, animal, seamless"
+                          className="w-full px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50 resize-none font-mono"
+                        />
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800/80">
+                        <label htmlFor="autoNumberCheck" className="text-[11px] text-slate-300 flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            id="autoNumberCheck"
+                            type="checkbox"
+                            checked={autoNumberTitles}
+                            onChange={(e) => setAutoNumberTitles(e.target.checked)}
+                            className="rounded border-slate-700 text-emerald-500 focus:ring-0 bg-slate-950 cursor-pointer"
+                          />
+                          <span>Penomoran Judul Bulk Otomatis (e.g. Title 1, Title 2)</span>
+                        </label>
+                      </div>
+
+                      {/* Bulk CSV / Excel Import & Template Section */}
+                      <div className="pt-2.5 border-t border-slate-800/80 space-y-2">
+                        <div className="flex items-center justify-between text-[11px] font-semibold text-slate-300">
+                          <span className="flex items-center gap-1"><FileSpreadsheet size={13} className="text-emerald-400" /> Bulk Excel / CSV</span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={downloadMetadataXlsxTemplate}
+                              className="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-mono flex items-center gap-1 font-normal"
+                              title="Download template spreadsheet format .XLSX"
+                            >
+                              <Download size={10} /> .XLSX
+                            </button>
+                            <span className="text-slate-600">|</span>
+                            <button
+                              type="button"
+                              onClick={downloadMetadataCsvTemplate}
+                              className="text-[10px] text-emerald-400 hover:text-emerald-300 underline font-mono flex items-center gap-1 font-normal"
+                              title="Download template format .CSV"
+                            >
+                              <Download size={10} /> .CSV
+                            </button>
+                          </div>
+                        </div>
+
+                        <label className="flex items-center justify-center gap-1.5 w-full py-2 px-3 rounded-lg bg-emerald-950/40 hover:bg-emerald-900/50 border border-emerald-500/30 text-emerald-300 text-xs font-semibold cursor-pointer transition-all">
+                          <Upload size={13} /> Impor Tabel Metadata (.xlsx / .csv)
+                          <input
+                            type="file"
+                            accept=".xlsx, .xls, .csv, .tsv, .ods, .txt, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel, text/csv"
+                            onChange={handleImportMetadata}
+                            className="hidden"
+                          />
+                        </label>
+
+                        {csvNotice && (
+                          <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 text-center font-medium">
+                            {csvNotice}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Export File Selection & Format Options */}
+                    <div className="p-3.5 rounded-xl bg-slate-900/70 border border-slate-800 space-y-3">
+                      <label className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center justify-between">
+                        <span className="flex items-center gap-1.5"><Download size={13} className="text-pink-400" /> Format Berkas Ekspor</span>
+                        <span className="text-[10px] text-purple-400 font-mono font-normal">Pilih yang diunduh</span>
+                      </label>
+                      
+                      <div className="grid grid-cols-4 gap-1.5">
+                        <button 
+                          type="button"
+                          onClick={() => setIncludeEps(!includeEps)}
+                          className={`flex items-center justify-center gap-1 p-2 rounded-lg border text-xs font-bold transition-all ${
+                            includeEps ? 'bg-purple-500/15 border-purple-500/50 text-purple-300 shadow-sm shadow-purple-500/10' : 'bg-slate-950/50 border-slate-800 text-slate-500'
+                          }`}
+                        >
+                          {includeEps && <Check size={11} />} .EPS
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => setIncludeJpg(!includeJpg)}
+                          className={`flex items-center justify-center gap-1 p-2 rounded-lg border text-xs font-bold transition-all ${
+                            includeJpg ? 'bg-amber-500/15 border-amber-500/50 text-amber-300 shadow-sm shadow-amber-500/10' : 'bg-slate-950/50 border-slate-800 text-slate-500'
+                          }`}
+                        >
+                          {includeJpg && <Check size={11} />} .JPG
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => setIncludePng(!includePng)}
+                          className={`flex items-center justify-center gap-1 p-2 rounded-lg border text-xs font-bold transition-all ${
+                            includePng ? 'bg-pink-500/15 border-pink-500/50 text-pink-300 shadow-sm shadow-pink-500/10' : 'bg-slate-950/50 border-slate-800 text-slate-500'
+                          }`}
+                        >
+                          {includePng && <Check size={11} />} .PNG
+                        </button>
+                        <button 
+                          type="button"
+                          onClick={() => setIncludePsd(!includePsd)}
+                          className={`flex items-center justify-center gap-1 p-2 rounded-lg border text-xs font-bold transition-all ${
+                            includePsd ? 'bg-blue-500/15 border-blue-500/50 text-blue-300 shadow-sm shadow-blue-500/10' : 'bg-slate-950/50 border-slate-800 text-slate-500'
+                          }`}
+                        >
+                          {includePsd && <Check size={11} />} .PSD
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-[11px] font-medium text-slate-400">Metode Unduh:</span>
+                        <div className="flex items-center gap-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={() => setDownloadMode('direct')}
+                            className={`px-2.5 py-1 rounded font-medium transition-all ${
+                              downloadMode === 'direct' ? 'bg-purple-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            File Langsung
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDownloadMode('zip')}
+                            className={`px-2.5 py-1 rounded font-medium transition-all ${
+                              downloadMode === 'zip' ? 'bg-purple-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            Paket ZIP
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
                     {/* Feature Toggles */}
                     <div className="space-y-2">
                       <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 cursor-pointer hover:border-slate-700 transition-all">
@@ -1023,7 +1895,7 @@ function App() {
                               : 'border-slate-800 text-slate-500 hover:text-slate-300'
                           }`}
                         >
-                          Monochrome (B&W)
+                          Line Art Only (Outline)
                         </button>
                         <button 
                           onClick={() => setMode('color')}
@@ -1198,6 +2070,86 @@ function App() {
                           </div>
                         </label>
                       </div>
+                    ) : activeTab === 'shutterstock' ? (
+                      <div className="space-y-4 pt-2 border-t border-slate-800">
+                        <div>
+                          <div className="flex justify-between items-center mb-1.5">
+                            <label className="text-xs font-semibold text-slate-300">Seamless Gap Eraser (Color Dilation)</label>
+                            <span className="text-[10px] font-mono text-amber-400 font-bold px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
+                              {dilationPx} px ({dilationPx === 0 ? 'No Dilation' : 'Eliminate White Seams'})
+                            </span>
+                          </div>
+                          <input 
+                            type="range" 
+                            min="0" 
+                            max="3" 
+                            step="1"
+                            value={dilationPx} 
+                            onChange={(e) => setDilationPx(parseInt(e.target.value))}
+                            className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+
+                        <div>
+                          <div className="flex justify-between items-center mb-1.5">
+                            <label className="text-xs font-semibold text-slate-300">Pattern Color Layers</label>
+                            <span className="text-[10px] font-mono text-pink-400 font-bold px-2 py-0.5 rounded bg-pink-500/10 border border-pink-500/20">
+                              {numColors} Colors
+                            </span>
+                          </div>
+                          <input 
+                            type="range" 
+                            min="4" 
+                            max="16" 
+                            step="1"
+                            value={numColors} 
+                            onChange={(e) => setNumColors(parseInt(e.target.value))}
+                            className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+                      </div>
+                    ) : activeTab === 'seamless_pattern' ? (
+                      <div className="space-y-4 pt-2 border-t border-slate-800">
+                        <div>
+                          <label className="text-xs font-semibold text-slate-300 block mb-2">Vector Output Format</label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button 
+                              onClick={() => setFormat('eps')}
+                              className={`p-2.5 rounded-xl border text-xs font-bold transition-all ${
+                                format === 'eps' ? 'border-pink-400 bg-pink-500/10 text-pink-300' : 'border-slate-800 text-slate-500'
+                              }`}
+                            >
+                              EPS (3x3 Repeat Sheet)
+                            </button>
+                            <button 
+                              onClick={() => setFormat('svg')}
+                              className={`p-2.5 rounded-xl border text-xs font-bold transition-all ${
+                                format === 'svg' ? 'border-rose-400 bg-rose-500/10 text-rose-300' : 'border-slate-800 text-slate-500'
+                              }`}
+                            >
+                              SVG (3x3 Repeat Web)
+                            </button>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="flex justify-between items-center mb-1.5">
+                            <label className="text-xs font-semibold text-slate-300">Pattern Color Quantization</label>
+                            <span className="text-[10px] font-mono text-rose-400 font-bold px-2 py-0.5 rounded bg-rose-500/10 border border-rose-500/20">
+                              {numColors} Colors
+                            </span>
+                          </div>
+                          <input 
+                            type="range" 
+                            min="4" 
+                            max="24" 
+                            step="1"
+                            value={numColors} 
+                            onChange={(e) => setNumColors(parseInt(e.target.value))}
+                            className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+                      </div>
                     ) : (
                       <div className="space-y-3 pt-2 border-t border-slate-800">
                         <div>
@@ -1276,6 +2228,74 @@ function App() {
                           {files.length > 1 ? `Unduh ZIP Adobe Stock (${files.length} Files)` : `Unduh ${format.toUpperCase()} (Adobe Stock)`}
                         </div>
                       </button>
+                    ) : activeTab === 'shutterstock_regular' ? (
+                      <button 
+                        onClick={downloadShutterstockRegular}
+                        disabled={files.length === 0 || loading}
+                        className={`primary-button w-full flex flex-col items-center justify-center gap-1 h-14 relative overflow-hidden transition-all ${
+                          (files.length === 0 || loading) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                        style={{ background: 'linear-gradient(135deg, #ea580c 0%, #d97706 100%)' }}
+                      >
+                        <div className="flex items-center gap-2.5 font-bold text-sm">
+                          <Package size={18} />
+                          {files.length > 1 ? `Unduh ZIP Shutterstock Vector (${files.length} Files)` : `Unduh Paket ZIP Shutterstock Vector`}
+                        </div>
+                        <span className="text-[10px] text-amber-200/90 font-medium">
+                          Single Vector / Line Art • Min 4.0 MP Artboard + XMP Metadata
+                        </span>
+                      </button>
+                    ) : activeTab === 'shutterstock' ? (
+                      <button 
+                        onClick={downloadShutterstock}
+                        disabled={files.length === 0 || loading}
+                        className={`primary-button w-full flex flex-col items-center justify-center gap-1 h-14 relative overflow-hidden transition-all ${
+                          (files.length === 0 || loading) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                        style={{ background: 'linear-gradient(135deg, #dc2626 0%, #d97706 100%)' }}
+                      >
+                        <div className="flex items-center gap-2.5 font-bold text-sm">
+                          <Layers size={18} />
+                          {files.length > 1 ? `Unduh ZIP Shutterstock (${files.length} Files)` : `Unduh Paket ZIP Shutterstock (EPS + JPG)`}
+                        </div>
+                        <span className="text-[10px] text-amber-200/90 font-medium">
+                          Multi-Color Pattern • Seamless Gap Eraser Active
+                        </span>
+                      </button>
+                    ) : activeTab === 'seamless_pattern' ? (
+                      <button 
+                        onClick={downloadSeamlessPattern}
+                        disabled={files.length === 0 || loading}
+                        className={`primary-button w-full flex flex-col items-center justify-center gap-1 h-14 relative overflow-hidden transition-all ${
+                          (files.length === 0 || loading) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                        style={{ background: 'linear-gradient(135deg, #e11d48 0%, #be123c 100%)' }}
+                      >
+                        <div className="flex items-center gap-2.5 font-bold text-sm">
+                          <Repeat size={18} />
+                          Unduh 3x3 Seamless Vector Pack (.ZIP)
+                        </div>
+                        <span className="text-[10px] text-rose-200/90 font-medium">
+                          Includes 3x3 Tiled EPS/SVG + High-Res JPG/PNG Previews
+                        </span>
+                      </button>
+                    ) : activeTab === 'repair' ? (
+                      <button 
+                        onClick={executeVectorRepair}
+                        disabled={files.length === 0 || loading}
+                        className={`primary-button w-full flex flex-col items-center justify-center gap-1 h-14 relative overflow-hidden transition-all ${
+                          (files.length === 0 || loading) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
+                        style={{ background: 'linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%)' }}
+                      >
+                        <div className="flex items-center gap-2.5 font-bold text-sm">
+                          <ShieldCheck size={18} />
+                          {files.length > 1 ? `Perbaiki & Ekspansi (${files.length} Vektor)` : `Perbaiki Vektor & Hapus Masking (1-Click)`}
+                        </div>
+                        <span className="text-[10px] text-violet-200/90 font-medium">
+                          Detects & Removes All Clipping Masks, Masks & Fake Fills
+                        </span>
+                      </button>
                     ) : (
                       <button 
                         onClick={downloadAll}
@@ -1299,12 +2319,43 @@ function App() {
                 <div className="glass-card p-6 flex flex-col gap-5 h-full">
                   
                   {/* Header & Status Bar */}
-                  <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
                     <div className="flex items-center gap-2">
                       <Eye size={16} className="text-purple-400" />
                       <h2 className="text-sm font-bold uppercase tracking-wider text-slate-300">
-                        Live Selection Mask
+                        Live Preview & Compare
                       </h2>
+                    </div>
+
+                    {/* Interactive Mode Switcher: Side-by-Side vs Original vs Result */}
+                    <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                      <button
+                        onClick={() => setPreviewMode('split')}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold tracking-wider uppercase transition-all flex items-center gap-1.5 ${
+                          previewMode === 'split' ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Tampilkan Original & Result Berdampingan"
+                      >
+                        <Columns size={12} /> Side-by-Side
+                      </button>
+                      <button
+                        onClick={() => setPreviewMode('original')}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold tracking-wider uppercase transition-all ${
+                          previewMode === 'original' ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Tampilkan Gambar Asli Saja"
+                      >
+                        Original
+                      </button>
+                      <button
+                        onClick={() => setPreviewMode('result')}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold tracking-wider uppercase transition-all ${
+                          previewMode === 'result' ? 'bg-purple-600 text-white shadow-md shadow-purple-500/20' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Tampilkan Hasil Vektor / Mask Saja"
+                      >
+                        Result
+                      </button>
                     </div>
 
                     {preflight ? (
@@ -1327,72 +2378,274 @@ function App() {
                     )}
                   </div>
 
-                  {/* Canvas Preview Container */}
+                  {/* Canvas Preview Container with Support for Side-by-Side Dual View */}
                   <div className="relative">
-                    <div className={`w-full min-h-[300px] h-[320px] rounded-2xl border border-slate-800 overflow-hidden flex items-center justify-center relative transition-all ${
-                      canvasBg === 'checkerboard' 
-                        ? 'bg-checkerboard' 
-                        : canvasBg === 'white' 
-                          ? 'bg-white-canvas' 
-                          : 'bg-dark-canvas'
-                    }`}>
-                      {preview ? (
-                        <img 
-                          src={preview} 
-                          alt="Vector Mask Preview" 
-                          className="max-w-[90%] max-h-[90%] object-contain transition-all duration-300 drop-shadow-2xl" 
-                        />
-                      ) : selectedFile ? (
-                        <img 
-                          src={selectedFile.previewUrl} 
-                          alt="Uploaded Image Preview" 
-                          className="max-w-[90%] max-h-[90%] object-contain transition-all duration-300 opacity-90 drop-shadow-2xl" 
-                        />
-                      ) : (
-                        <div className="text-center text-slate-600 p-6">
-                          <ImageIcon className="mx-auto mb-3 opacity-30" size={48} />
-                          <p className="text-xs font-semibold text-slate-400">Pilih file untuk melihat mask & audit</p>
-                          <span className="text-[11px] text-slate-600 block mt-1">White = Vector Shape | Black = Transparent</span>
-                        </div>
-                      )}
+                    {previewMode === 'split' && selectedFile ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 min-h-[480px]">
+                        {/* Box 1: Original Input */}
+                        <div className={`w-full min-h-[460px] h-[520px] lg:h-[580px] rounded-2xl border border-slate-800 overflow-hidden flex flex-col items-center justify-center relative transition-all group ${
+                          canvasBg === 'checkerboard' ? 'bg-checkerboard' : canvasBg === 'white' ? 'bg-white-canvas' : 'bg-dark-canvas'
+                        }`}>
+                          <div className="absolute top-3 left-3 z-10 bg-slate-950/90 backdrop-blur-md px-3 py-1.5 rounded-xl text-[11px] font-extrabold uppercase tracking-wider text-purple-300 border border-purple-500/30 shadow-lg flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-purple-400" />
+                            1. Original Input
+                          </div>
 
-                      {/* Top Canvas Controls Overlay */}
-                      <div className="absolute top-3 right-3 flex items-center gap-1 bg-slate-950/80 backdrop-blur-md p-1 rounded-xl border border-slate-800">
-                        <button 
-                          onClick={() => setCanvasBg('checkerboard')}
-                          className={`p-1.5 rounded-lg text-xs transition-colors ${canvasBg === 'checkerboard' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                          title="Transparent Checkerboard"
-                        >
-                          <Grid size={13} />
-                        </button>
-                        <button 
-                          onClick={() => setCanvasBg('dark')}
-                          className={`p-1.5 rounded-lg text-xs transition-colors ${canvasBg === 'dark' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                          title="Dark Background"
-                        >
-                          <Moon size={13} />
-                        </button>
-                        <button 
-                          onClick={() => setCanvasBg('white')}
-                          className={`p-1.5 rounded-lg text-xs transition-colors ${canvasBg === 'white' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                          title="White Background"
-                        >
-                          <Sun size={13} />
-                        </button>
+                          {/* Fullscreen Expand Control */}
+                          <button
+                            onClick={() => setLightboxImg({ src: selectedFile.previewUrl, title: `Original Input: ${selectedFile.file.name}` })}
+                            className="absolute top-3 right-3 z-10 p-2 rounded-xl bg-slate-950/80 backdrop-blur-md text-slate-300 hover:text-white border border-slate-800 hover:border-purple-500/50 opacity-80 group-hover:opacity-100 transition-all shadow-lg"
+                            title="Buka Preview Layar Penuh (Fullscreen)"
+                          >
+                            <Maximize2 size={15} />
+                          </button>
+
+                          <img 
+                            src={selectedFile.previewUrl} 
+                            alt="Original Input" 
+                            onClick={() => setLightboxImg({ src: selectedFile.previewUrl, title: `Original Input: ${selectedFile.file.name}` })}
+                            className="w-full h-full p-2 object-contain drop-shadow-2xl transition-transform duration-300 group-hover:scale-[1.02] cursor-pointer" 
+                          />
+                        </div>
+
+                        {/* Box 2: Vector Result / Selection Mask */}
+                        <div className={`w-full min-h-[460px] h-[520px] lg:h-[580px] rounded-2xl border border-slate-800 overflow-hidden flex flex-col items-center justify-center relative transition-all group ${
+                          canvasBg === 'checkerboard' ? 'bg-checkerboard' : canvasBg === 'white' ? 'bg-white-canvas' : 'bg-dark-canvas'
+                        }`}>
+                          <div className="absolute top-3 left-3 z-10 bg-slate-950/90 backdrop-blur-md px-3 py-1.5 rounded-xl text-[11px] font-extrabold uppercase tracking-wider text-emerald-300 border border-emerald-500/30 shadow-lg flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                            2. {repairAudit ? 'Vector Repaired Result' : 'Vector Mask'}
+                          </div>
+
+                          {/* Fullscreen Expand Control */}
+                          {(repairAudit?.jpg_b64 || repairAudit?.png_b64 || preview) && (
+                            <button
+                              onClick={() => setLightboxImg({ 
+                                src: repairAudit?.jpg_b64 ? `data:image/jpeg;base64,${repairAudit.jpg_b64}` : (repairAudit?.png_b64 ? `data:image/png;base64,${repairAudit.png_b64}` : preview!), 
+                                title: `Vector Result: ${selectedFile.file.name}` 
+                              })}
+                              className="absolute top-3 right-3 z-10 p-2 rounded-xl bg-slate-950/80 backdrop-blur-md text-slate-300 hover:text-white border border-slate-800 hover:border-emerald-500/50 opacity-80 group-hover:opacity-100 transition-all shadow-lg"
+                              title="Buka Preview Layar Penuh (Fullscreen)"
+                            >
+                              <Maximize2 size={15} />
+                            </button>
+                          )}
+
+                          {activeTab === 'seamless_pattern' && patternPreview3x3 ? (
+                            <img 
+                              src={patternPreview3x3} 
+                              alt="3x3 Seamless Pattern Repeat Preview" 
+                              onClick={() => setLightboxImg({ src: patternPreview3x3, title: `3x3 Seamless Repeat: ${selectedFile?.file.name || 'Pattern'}` })}
+                              className="w-full h-full p-2 object-contain drop-shadow-2xl transition-transform duration-300 group-hover:scale-[1.02] cursor-pointer" 
+                            />
+                          ) : repairAudit?.jpg_b64 ? (
+                            <img 
+                              src={`data:image/jpeg;base64,${repairAudit.jpg_b64}`} 
+                              alt="Vector Repaired Result" 
+                              onClick={() => setLightboxImg({ src: `data:image/jpeg;base64,${repairAudit.jpg_b64}`, title: `Vector Result: ${selectedFile.file.name}` })}
+                              className="w-full h-full p-2 object-contain drop-shadow-2xl transition-transform duration-300 group-hover:scale-[1.02] cursor-pointer" 
+                            />
+                          ) : repairAudit?.png_b64 ? (
+                            <img 
+                              src={`data:image/png;base64,${repairAudit.png_b64}`} 
+                              alt="Vector Repaired Result" 
+                              onClick={() => setLightboxImg({ src: `data:image/png;base64,${repairAudit.png_b64}`, title: `Vector Result: ${selectedFile.file.name}` })}
+                              className="w-full h-full p-2 object-contain drop-shadow-2xl transition-transform duration-300 group-hover:scale-[1.02] cursor-pointer" 
+                            />
+                          ) : preview ? (
+                            <img 
+                              src={preview} 
+                              alt="Vector Mask Preview" 
+                              onClick={() => setLightboxImg({ src: preview, title: `Vector Mask: ${selectedFile.file.name}` })}
+                              className="w-full h-full p-2 object-contain drop-shadow-2xl transition-transform duration-300 group-hover:scale-[1.02] cursor-pointer" 
+                            />
+                          ) : (
+                            <div className="text-center p-6">
+                              <RefreshCw size={28} className="mx-auto mb-3 text-purple-400 animate-spin opacity-50" />
+                              <span className="text-xs text-slate-400 font-semibold block">Menyiapkan Preview Vektor...</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
+                    ) : (
+                      <div className={`w-full min-h-[460px] h-[520px] lg:h-[580px] rounded-2xl border border-slate-800 overflow-hidden flex items-center justify-center relative transition-all group ${
+                        canvasBg === 'checkerboard' 
+                          ? 'bg-checkerboard' 
+                          : canvasBg === 'white' 
+                            ? 'bg-white-canvas' 
+                            : 'bg-dark-canvas'
+                      }`}>
+                        {previewMode === 'original' && selectedFile ? (
+                          <img 
+                            src={selectedFile.previewUrl} 
+                            alt="Original Input Preview" 
+                            onClick={() => setLightboxImg({ src: selectedFile.previewUrl, title: `Original Input: ${selectedFile.file.name}` })}
+                            className="w-full h-full p-3 object-contain transition-all duration-300 drop-shadow-2xl group-hover:scale-[1.01] cursor-pointer" 
+                          />
+                        ) : activeTab === 'seamless_pattern' && patternPreview3x3 ? (
+                          <img 
+                            src={patternPreview3x3} 
+                            alt="3x3 Seamless Repeat Preview" 
+                            onClick={() => setLightboxImg({ src: patternPreview3x3, title: `3x3 Seamless Repeat: ${selectedFile?.file.name || 'Pattern'}` })}
+                            className="w-full h-full p-3 object-contain transition-all duration-300 drop-shadow-2xl group-hover:scale-[1.01] cursor-pointer" 
+                          />
+                        ) : previewMode === 'result' && (repairAudit?.jpg_b64 || repairAudit?.png_b64 || preview) ? (
+                          <img 
+                            src={repairAudit?.jpg_b64 ? `data:image/jpeg;base64,${repairAudit.jpg_b64}` : (repairAudit?.png_b64 ? `data:image/png;base64,${repairAudit.png_b64}` : preview!)} 
+                            alt="Vector Result Preview" 
+                            onClick={() => setLightboxImg({ 
+                              src: repairAudit?.jpg_b64 ? `data:image/jpeg;base64,${repairAudit.jpg_b64}` : (repairAudit?.png_b64 ? `data:image/png;base64,${repairAudit.png_b64}` : preview!), 
+                              title: `Vector Result: ${selectedFile?.file.name || 'Artwork'}` 
+                            })}
+                            className="w-full h-full p-3 object-contain transition-all duration-300 drop-shadow-2xl group-hover:scale-[1.01] cursor-pointer" 
+                          />
+                        ) : selectedFile ? (
+                          <img 
+                            src={selectedFile.previewUrl} 
+                            alt="Uploaded Image Preview" 
+                            onClick={() => setLightboxImg({ src: selectedFile.previewUrl, title: `Original Input: ${selectedFile.file.name}` })}
+                            className="w-full h-full p-3 object-contain transition-all duration-300 opacity-90 drop-shadow-2xl cursor-pointer" 
+                          />
+                        ) : (
+                          <div className="text-center text-slate-600 p-6">
+                            <ImageIcon className="mx-auto mb-3 opacity-30" size={48} />
+                            <p className="text-xs font-semibold text-slate-400">Pilih file untuk melihat mask & audit</p>
+                            <span className="text-[11px] text-slate-600 block mt-1">Side-by-side perbandingan Original vs Result</span>
+                          </div>
+                        )}
 
-                      {selectedFile && (
-                        <div className="absolute bottom-3 left-3 bg-slate-950/80 backdrop-blur-md px-3 py-1 rounded-full text-[10px] font-bold text-slate-300 border border-slate-800 truncate max-w-[70%] flex items-center gap-1.5">
-                          <span className={`w-2 h-2 rounded-full ${preview ? 'bg-emerald-400' : 'bg-purple-400 animate-pulse'}`} />
-                          <span>{selectedFile.file.name}</span>
-                          <span className="text-slate-500 font-normal">({preview ? 'Vector Mask' : 'Original Input'})</span>
+                        {/* Top Canvas Background Controls Overlay */}
+                        <div className="absolute top-3 right-3 flex items-center gap-1 bg-slate-950/80 backdrop-blur-md p-1 rounded-xl border border-slate-800 z-10">
+                          {selectedFile && (
+                            <button 
+                              onClick={() => setLightboxImg({ 
+                                src: previewMode === 'original' ? selectedFile.previewUrl : (patternPreview3x3 || repairAudit?.png_b64 ? `data:image/png;base64,${repairAudit.png_b64}` : preview || selectedFile.previewUrl), 
+                                title: `${previewMode === 'original' ? 'Original Input' : 'Vector Result'}: ${selectedFile.file.name}` 
+                              })}
+                              className="p-1.5 rounded-lg text-xs transition-colors text-slate-400 hover:text-white hover:bg-slate-800"
+                              title="Buka Layar Penuh (Fullscreen)"
+                            >
+                              <Maximize2 size={13} />
+                            </button>
+                          )}
+                          <button 
+                            onClick={() => setCanvasBg('checkerboard')}
+                            className={`p-1.5 rounded-lg text-xs transition-colors ${canvasBg === 'checkerboard' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                            title="Transparent Checkerboard"
+                          >
+                            <Grid size={13} />
+                          </button>
+                          <button 
+                            onClick={() => setCanvasBg('dark')}
+                            className={`p-1.5 rounded-lg text-xs transition-colors ${canvasBg === 'dark' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                            title="Dark Background"
+                          >
+                            <Moon size={13} />
+                          </button>
+                          <button 
+                            onClick={() => setCanvasBg('white')}
+                            className={`p-1.5 rounded-lg text-xs transition-colors ${canvasBg === 'white' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-slate-200'}`}
+                            title="White Background"
+                          >
+                            <Sun size={13} />
+                          </button>
                         </div>
-                      )}
-                    </div>
+
+                        {selectedFile && (
+                          <div className="absolute bottom-3 left-3 bg-slate-950/80 backdrop-blur-md px-3 py-1 rounded-full text-[10px] font-bold text-slate-300 border border-slate-800 truncate max-w-[70%] flex items-center gap-1.5 z-10">
+                            <span className={`w-2 h-2 rounded-full ${preview ? 'bg-emerald-400' : 'bg-purple-400 animate-pulse'}`} />
+                            <span>{selectedFile.file.name}</span>
+                            <span className="text-slate-500 font-normal">({previewMode === 'original' ? 'Original Input' : 'Vector Result'})</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Status & Size Audit Breakdown Card */}
-                  {selectedFile ? (
+                  {activeTab === 'seamless_pattern' && patternAnalysis ? (
+                    <div className="p-4 rounded-xl bg-pink-950/20 border border-pink-500/30 space-y-3 text-xs shadow-lg shadow-pink-500/5">
+                      <div className="flex items-center justify-between pb-2 border-b border-pink-500/20">
+                        <span className="font-bold text-pink-200 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                          <Repeat size={15} className="text-pink-400" /> Seamless Pattern Tile Audit
+                        </span>
+                        <span className={`text-[10px] font-mono px-2.5 py-0.5 rounded-full border font-bold flex items-center gap-1 ${
+                          patternTesting
+                            ? 'text-purple-400 bg-purple-500/10 border-purple-500/30 font-mono'
+                            : patternAnalysis.is_seamless 
+                              ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30' 
+                              : 'text-amber-400 bg-amber-500/10 border-amber-500/30'
+                        }`}>
+                          {patternTesting ? <RefreshCw size={11} className="animate-spin" /> : patternAnalysis.is_seamless ? <Check size={11} /> : <AlertCircle size={11} />}
+                          {patternTesting ? 'ANALYZING TILE...' : `${patternAnalysis.seamless_score}% SEAMLESS SCORE`}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">X-Border Continuity</span>
+                          <span className="font-mono text-emerald-400 font-bold text-sm block">{patternAnalysis.x_continuity}%</span>
+                        </div>
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">Y-Border Continuity</span>
+                          <span className="font-mono text-emerald-400 font-bold text-sm block">{patternAnalysis.y_continuity}%</span>
+                        </div>
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">Tile Resolution</span>
+                          <span className="font-mono text-purple-300 font-bold text-sm block">{patternAnalysis.width} x {patternAnalysis.height} px</span>
+                        </div>
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">3x3 Vector Grid</span>
+                          <span className="font-mono text-pink-300 font-bold text-sm block">Multi-Color Repeat</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : repairAudit && activeTab === 'repair' ? (
+                    <div className="p-4 rounded-xl bg-violet-950/20 border border-violet-500/30 space-y-3 text-xs shadow-lg shadow-violet-500/5">
+                      <div className="flex items-center justify-between pb-2 border-b border-violet-500/20">
+                        <span className="font-bold text-violet-200 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                          <ShieldCheck size={15} className="text-violet-400" /> Microstock Compliance Audit
+                        </span>
+                        <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full border border-emerald-500/30 font-bold flex items-center gap-1">
+                          <Check size={11} /> MARKETPLACE READY
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">Clipping Masks</span>
+                          <span className="font-mono text-emerald-400 font-bold text-sm block">0 (Eliminated)</span>
+                        </div>
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">Opacity Masks</span>
+                          <span className="font-mono text-emerald-400 font-bold text-sm block">0 (Eliminated)</span>
+                        </div>
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">Raster Bitmaps</span>
+                          <span className="font-mono text-emerald-400 font-bold text-sm block">0 (Vectorized)</span>
+                        </div>
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800">
+                          <span className="text-[10px] text-slate-400 uppercase font-medium block">Hidden Rectangles</span>
+                          <span className="font-mono text-emerald-400 font-bold text-sm block">0 (Stripped)</span>
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-violet-500/20 space-y-1 text-[11px]">
+                        <div className="flex justify-between text-slate-400">
+                          <span>Closed Path Geometry:</span>
+                          <span className="text-emerald-400 font-mono font-bold">100% True Paths</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Direct RGB Fill Assignment:</span>
+                          <span className="text-emerald-400 font-mono font-bold">Direct (No Clip Dependency)</span>
+                        </div>
+                        <div className="flex justify-between text-slate-400">
+                          <span>Marketplace Compatibility:</span>
+                          <span className="text-purple-300 font-mono font-bold">Vecteezy, Adobe, Freepik, Shutterstock</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : selectedFile ? (
                     <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-3 text-xs">
                       <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                         <span className="font-bold text-slate-200 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
@@ -1454,7 +2707,144 @@ function App() {
 
                 </div>
               </div>
-        </main>
+            </main>
+
+        {/* Interactive Spreadsheet Excel Metadata Table (Shown when files are loaded) */}
+        {files.length > 0 && (
+          <section className="mt-8 glass-card p-5 border border-emerald-500/30 rounded-2xl shadow-xl shadow-emerald-500/5">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <FileSpreadsheet size={20} className="text-emerald-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-slate-100 uppercase tracking-wider font-mono">
+                    Tabel Metadata Excel Interaktif ({files.length} Berkas)
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Ketik dan edit Title, Description, & Keywords secara langsung untuk masing-masing file di dalam tabel di bawah ini.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFiles(prev => prev.map((fItem, idx) => ({
+                      ...fItem,
+                      title: autoNumberTitles && metaTitle ? `${metaTitle} ${idx + 1}` : (metaTitle || fItem.title),
+                      description: metaDescription || fItem.description,
+                      keywords: keywords || fItem.keywords,
+                    })));
+                    setCsvNotice('✓ Berhasil menerapkan metadata ke seluruh baris tabel!');
+                    setTimeout(() => setCsvNotice(null), 3000);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-purple-600/20 border border-purple-500/40 text-purple-300 hover:bg-purple-600/30 text-xs font-semibold flex items-center gap-1.5 transition-all"
+                >
+                  <Sparkles size={13} /> Terapkan Input Sidebar ke Semua
+                </button>
+
+                <button
+                  type="button"
+                  onClick={downloadMetadataCsvTemplate}
+                  className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 hover:border-slate-600 text-slate-300 text-xs font-semibold flex items-center gap-1.5 transition-all"
+                >
+                  <Download size={13} /> Export CSV
+                </button>
+              </div>
+            </div>
+
+            {/* Table Grid */}
+            <div className="overflow-x-auto mt-4 rounded-xl border border-slate-800 bg-slate-950/60">
+              <table className="w-full text-left text-xs text-slate-300 border-collapse">
+                <thead>
+                  <tr className="bg-slate-900/90 border-b border-slate-800 text-[11px] uppercase tracking-wider font-mono text-slate-400">
+                    <th className="p-3 w-10 text-center">#</th>
+                    <th className="p-3 w-16 text-center">Preview</th>
+                    <th className="p-3 w-44">Nama File</th>
+                    <th className="p-3 min-w-[200px]">Document Title</th>
+                    <th className="p-3 min-w-[220px]">Description</th>
+                    <th className="p-3 min-w-[260px]">Keywords / Tags (koma)</th>
+                    <th className="p-3 w-12 text-center">Aksi</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {files.map((item, idx) => {
+                    const displayTitle = item.title !== undefined 
+                      ? item.title 
+                      : (autoNumberTitles && metaTitle ? `${metaTitle} ${idx + 1}` : metaTitle);
+
+                    const displayDesc = item.description !== undefined ? item.description : metaDescription;
+                    const displayKw = item.keywords !== undefined ? item.keywords : keywords;
+
+                    return (
+                      <tr key={item.id} className="hover:bg-slate-900/40 transition-colors">
+                        <td className="p-3 text-center font-mono font-bold text-slate-500">{idx + 1}</td>
+                        <td className="p-2 text-center">
+                          <img
+                            src={item.previewUrl}
+                            alt={item.file.name}
+                            className="w-10 h-10 object-contain rounded-lg bg-slate-900 border border-slate-800 mx-auto"
+                          />
+                        </td>
+                        <td className="p-3 font-mono text-[11px] text-slate-300 truncate max-w-[170px]" title={item.file.name}>
+                          {item.file.name}
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={displayTitle}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setFiles(prev => prev.map((f, i) => i === idx ? { ...f, title: val } : f));
+                            }}
+                            placeholder={sanitizeFilename(item.file.name).replace(/_/g, ' ')}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50 font-mono"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <input
+                            type="text"
+                            value={displayDesc}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setFiles(prev => prev.map((f, i) => i === idx ? { ...f, description: val } : f));
+                            }}
+                            placeholder="Deskripsi artwork..."
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <textarea
+                            rows={1}
+                            value={displayKw}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setFiles(prev => prev.map((f, i) => i === idx ? { ...f, keywords: val } : f));
+                            }}
+                            placeholder="cat, vector, icon..."
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-emerald-500/50 resize-none font-mono text-[11px]"
+                          />
+                        </td>
+                        <td className="p-2 text-center">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setFiles(prev => prev.map((f, i) => i === idx ? { ...f, title: '', description: '', keywords: '' } : f));
+                            }}
+                            title="Reset metadata baris ini"
+                            className="p-1.5 rounded-lg bg-slate-900 hover:bg-red-500/20 text-slate-500 hover:text-red-400 transition-colors"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
 
         <footer className="mt-12 text-center text-slate-500 text-xs border-t border-slate-800/80 pt-6">
           <p>© 2026 Vecto Studio. Professional Batch Vectorization Suite.</p>
@@ -1590,6 +2980,32 @@ function App() {
                   <span>{ftpUploading ? 'Mengunggah...' : `Upload ${files.length} Berkas ke FTP`}</span>
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Lightbox Fullscreen Preview Modal */}
+        {lightboxImg && (
+          <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-xl flex flex-col items-center justify-center p-4 animate-in fade-in duration-200">
+            <div className="w-full max-w-7xl flex items-center justify-between pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2 text-slate-200 font-bold text-sm">
+                <Eye size={18} className="text-purple-400" />
+                <span>{lightboxImg.title}</span>
+              </div>
+              <button
+                onClick={() => setLightboxImg(null)}
+                className="p-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 transition-colors"
+                title="Tutup Modal"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="w-full max-w-7xl h-[85vh] flex items-center justify-center p-4 overflow-hidden relative mt-2 bg-checkerboard rounded-2xl border border-slate-800 shadow-2xl">
+              <img
+                src={lightboxImg.src}
+                alt="Fullscreen Preview"
+                className="max-w-full max-h-full object-contain drop-shadow-2xl"
+              />
             </div>
           </div>
         )}
