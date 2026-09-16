@@ -19,10 +19,15 @@ __pycache__/
 
 # Local data & temporary outputs
 scratch/
+download/
+download.zip
+test_out.zip
 *.eps
 *.jpg
+*.jpeg
 *.png
 *.svg
+*.psd
 
 # IDE and OS files
 .vscode/
