@@ -59,7 +59,6 @@ def _sync_preview(contents: bytes, threshold: int, inv: bool, mode: str, num_col
             if "/opt/homebrew/lib" not in os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", ""):
                 os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = f"/opt/homebrew/lib:{os.environ.get('DYLD_FALLBACK_LIBRARY_PATH', '')}"
             import vtracer
-            import time, re, base64
 
             t0 = time.time()
             trace_bytes = contents
@@ -1070,6 +1069,218 @@ async def bulk_clean_jpg_endpoint(
             media_type="application/zip",
             headers={"Content-Disposition": "attachment; filename=cleaned_jpgs_sanitized.zip"}
         )
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class IconGenerateProxyReq(BaseModel):
+    endpoint: str
+    api_key: str
+    payload: dict
+    mode: str = "auto"   # "auto" | "images" | "chat"
+    remove_background: bool = False
+    anti_ai: bool = False
+    fake_metadata: bool = False
+
+
+def _post_process_image(img_data: bytes, remove_bg: bool, anti_ai: bool, fake_metadata: bool) -> bytes:
+    """Apply optional post-processing to raw image bytes. Returns PNG bytes."""
+    import io, base64, numpy as np
+    from PIL import Image, ImageFilter, ImageEnhance
+    from PIL.PngImagePlugin import PngInfo
+
+    input_img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+
+    if remove_bg:
+        import rembg
+        input_img = rembg.remove(input_img)
+
+    if anti_ai:
+        bg = Image.new("RGBA", input_img.size, (255, 255, 255, 255))
+        bg.paste(input_img, (0, 0), input_img)
+        rgb_img = bg.convert("RGB")
+
+        orig_size = rgb_img.size
+        rgb_img = rgb_img.resize((int(orig_size[0]*1.02), int(orig_size[1]*0.98)), resample=Image.Resampling.LANCZOS)
+        rgb_img = rgb_img.crop((4, 4, orig_size[0]-4, orig_size[1]-4))
+        rgb_img = rgb_img.resize(orig_size, resample=Image.Resampling.BICUBIC)
+
+        arr = np.array(rgb_img, dtype=np.float32)
+        h, w = arr.shape[:2]
+        xx, yy = np.meshgrid(np.arange(w), np.arange(h))
+        adv_noise = np.sin(xx * 0.8) * np.cos(yy * 0.8) * 6.0
+        rand_noise = np.random.randn(h, w, 3) * 5.0
+        arr = np.clip(arr + adv_noise[:, :, np.newaxis] + rand_noise, 0, 255).astype(np.uint8)
+        rgb_img = Image.fromarray(arr)
+
+        r, g, b = rgb_img.split()
+        from PIL import ImageChops
+        r = ImageChops.offset(r, 1, 0)
+        b = ImageChops.offset(b, -1, 0)
+        rgb_img = Image.merge("RGB", (r, g, b))
+        rgb_img = rgb_img.filter(ImageFilter.GaussianBlur(radius=0.4))
+        rgb_img = rgb_img.filter(ImageFilter.UnsharpMask(radius=2.0, percent=120, threshold=3))
+        enhancer = ImageEnhance.Color(rgb_img)
+        rgb_img = enhancer.enhance(0.92)
+        tmp_io = io.BytesIO()
+        rgb_img.save(tmp_io, format="JPEG", quality=75)
+        rgb_img = Image.open(tmp_io)
+
+        if remove_bg:
+            r, g, b = rgb_img.split()
+            alpha = input_img.split()[3]
+            input_img = Image.merge("RGBA", (r, g, b, alpha))
+        else:
+            input_img = rgb_img.convert("RGBA")
+
+    buffered = io.BytesIO()
+    if fake_metadata:
+        metadata = PngInfo()
+        metadata.add_text("Software", "Adobe Photoshop 25.0 (Windows)")
+        metadata.add_text("Author", "Vecto Studio")
+        metadata.add_text("Description", "Handcrafted Vector Asset")
+        input_img.save(buffered, format="PNG", pnginfo=metadata)
+    else:
+        input_img.save(buffered, format="PNG")
+    return buffered.getvalue()
+
+
+@app.post("/api/generate-icon")
+async def proxy_generate_icon(req: IconGenerateProxyReq):
+    try:
+        import urllib.request
+        import json, base64, re
+
+        auth_header = f"Bearer {req.api_key}" if not req.api_key.startswith("Bearer ") else req.api_key
+        base_url = req.endpoint.strip().rstrip("/")
+        model = req.payload.get("model", "")
+        prompt = req.payload.get("prompt", "")
+
+        # --- Determine mode ---
+        # "auto": try chat completions for 9router ag/ models, otherwise images/generations
+        mode = req.mode
+        if mode == "auto":
+            # ag/ models use chat completions with native image output on 9router
+            if model.startswith("ag/") or model.startswith("gc/") or model.startswith("gemini/"):
+                mode = "chat"
+            else:
+                mode = "images"
+
+        resp_images_b64 = []  # list of raw b64 strings
+
+        if mode == "chat":
+            # Use /chat/completions with modalities: ["text", "image"] for native image generation
+            chat_url = base_url + "/chat/completions"
+            chat_payload = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "modalities": ["text", "image"]
+            }
+            data_bytes = json.dumps(chat_payload).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": auth_header,
+                "User-Agent": "VectoAI-Proxy/1.0"
+            }
+            http_req = urllib.request.Request(chat_url, data=data_bytes, headers=headers, method="POST")
+            with urllib.request.urlopen(http_req, timeout=180) as resp:
+                resp_body = resp.read().decode("utf-8", errors="ignore")
+            resp_data = json.loads(resp_body)
+
+            # Extract image(s) from chat completion response
+            # Standard chat completion: choices[].message.content (list of parts)
+            for choice in resp_data.get("choices", []):
+                msg = choice.get("message", {})
+                content = msg.get("content", "")
+                # Content can be a list of parts (OpenAI multi-modal) or plain text
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            if part.get("type") == "image_url":
+                                url_data = part.get("image_url", {}).get("url", "")
+                                if url_data.startswith("data:image/"):
+                                    # strip data url prefix
+                                    b64 = url_data.split(",", 1)[1]
+                                    resp_images_b64.append(b64)
+                            elif part.get("type") == "image":
+                                b64 = part.get("image_url", {}).get("url", "") or part.get("data", "")
+                                if b64:
+                                    resp_images_b64.append(b64.split(",", 1)[-1])
+                elif isinstance(content, str):
+                    # Gemini sometimes returns base64 inline in text - look for data URI
+                    matches = re.findall(r'data:image/[^;]+;base64,([A-Za-z0-9+/=]+)', content)
+                    resp_images_b64.extend(matches)
+                    # Also check inline_data via Gemini raw
+                    for part in msg.get("parts", []):
+                        if isinstance(part, dict) and "inline_data" in part:
+                            resp_images_b64.append(part["inline_data"].get("data", ""))
+
+            # Also check top-level "data" array (some 9router versions wrap it)
+            for item in resp_data.get("data", []):
+                if "b64_json" in item:
+                    resp_images_b64.append(item["b64_json"])
+                elif "url" in item and item["url"].startswith("data:image/"):
+                    resp_images_b64.append(item["url"].split(",", 1)[1])
+
+            if not resp_images_b64:
+                # No image found in response - surface the full response as error
+                raise HTTPException(status_code=502, detail=f"Model tidak mengembalikan gambar. Pastikan model mendukung image output. Response: {resp_body[:500]}")
+
+        else:
+            # Standard OpenAI /images/generations
+            img_url = base_url + "/images/generations"
+            img_payload = {k: v for k, v in req.payload.items()}
+            img_payload["response_format"] = "b64_json"
+            data_bytes = json.dumps(img_payload).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": auth_header,
+                "User-Agent": "VectoAI-Proxy/1.0"
+            }
+            http_req = urllib.request.Request(img_url, data=data_bytes, headers=headers, method="POST")
+            with urllib.request.urlopen(http_req, timeout=180) as resp:
+                resp_body = resp.read().decode("utf-8", errors="ignore")
+            resp_data = json.loads(resp_body)
+
+            for item in resp_data.get("data", []):
+                if "b64_json" in item:
+                    resp_images_b64.append(item["b64_json"])
+                elif "url" in item:
+                    # fetch url
+                    img_req = urllib.request.Request(item["url"], headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(img_req, timeout=30) as img_resp:
+                        raw = img_resp.read()
+                    import base64 as _b64
+                    resp_images_b64.append(_b64.b64encode(raw).decode())
+
+        # Post-process and return in standard {data: [{b64_json: ...}]} format
+        result_items = []
+        for b64_str in resp_images_b64:
+            try:
+                raw_bytes = base64.b64decode(b64_str)
+                if req.remove_background or req.anti_ai or req.fake_metadata:
+                    processed = await asyncio.to_thread(
+                        _post_process_image, raw_bytes,
+                        req.remove_background, req.anti_ai, req.fake_metadata
+                    )
+                    result_items.append({"b64_json": base64.b64encode(processed).decode()})
+                else:
+                    result_items.append({"b64_json": b64_str})
+            except Exception as ex:
+                print(f"Post-processing error: {ex}")
+                result_items.append({"b64_json": b64_str})
+
+        return {"data": result_items}
+
+    except HTTPException:
+        raise
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        raise HTTPException(status_code=e.code, detail=err_body or str(e))
     except Exception as e:
         import traceback
         traceback.print_exc()

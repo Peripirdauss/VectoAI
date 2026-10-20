@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
+import VecteezyMetadataGenerator from './components/VecteezyMetadataGenerator';
+import IconGenerator from './components/IconGenerator';
 import { 
   Upload, Download, RefreshCw, Layers, AlertCircle, FileText, Trash2, 
   Check, Sparkles, CheckCircle2, Image as ImageIcon, ShieldCheck, 
@@ -221,7 +223,7 @@ interface ProgressState {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'vectorizer' | 'vecteezy' | 'freepik' | 'adobe' | 'shutterstock' | 'shutterstock_regular' | 'seamless_pattern' | 'repair'>('shutterstock_regular');
+  const [activeTab, setActiveTab] = useState<'vectorizer' | 'vecteezy' | 'freepik' | 'adobe' | 'shutterstock' | 'shutterstock_regular' | 'seamless_pattern' | 'repair' | 'vecteezy_metadata' | 'ai_icon'>('shutterstock_regular');
   const [repairAudit, setRepairAudit] = useState<any | null>(null);
   const [patternAnalysis, setPatternAnalysis] = useState<any | null>(null);
   const [patternPreview3x3, setPatternPreview3x3] = useState<string | null>(null);
@@ -1778,6 +1780,30 @@ function App() {
             <Sparkles size={15} />
             Vecteezy Preset
           </button>
+          
+          <button
+            onClick={() => setActiveTab('vecteezy_metadata')}
+            className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-3 rounded-xl text-xs font-bold transition-all duration-300 ${
+              activeTab === 'vecteezy_metadata'
+                ? 'bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-lg shadow-orange-500/25 glow-orange'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+            }`}
+          >
+            <Sparkles size={15} />
+            Metadata AI (Vecteezy)
+          </button>
+
+          <button
+            onClick={() => setActiveTab('ai_icon')}
+            className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 py-3 px-3 rounded-xl text-xs font-bold transition-all duration-300 ${
+              activeTab === 'ai_icon'
+                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg shadow-blue-500/25 glow-blue'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+            }`}
+          >
+            <Sparkles size={15} />
+            Generate Icon (9router)
+          </button>
 
           <button
             onClick={() => setActiveTab('adobe')}
@@ -1852,7 +1878,16 @@ function App() {
           </button>
         </div>
 
-        {/* Main Grid */}
+        {/* Main Grid or Metadata AI Tab */}
+        <div className={activeTab === 'vecteezy_metadata' ? 'block mt-2' : 'hidden'}>
+          <VecteezyMetadataGenerator />
+        </div>
+
+        <div className={activeTab === 'ai_icon' ? 'block mt-2' : 'hidden'}>
+          <IconGenerator />
+        </div>
+        
+        <div className={(activeTab !== 'vecteezy_metadata' && activeTab !== 'ai_icon') ? 'block' : 'hidden'}>
         <main className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           
           {/* Column 1: Upload & Active Batch List (3 cols) */}
@@ -4053,6 +4088,7 @@ function App() {
             </div>
           </div>
         )}
+        </div>
 
         {/* Lightbox Fullscreen Preview Modal */}
         {lightboxImg && (

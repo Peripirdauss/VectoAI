@@ -276,7 +276,10 @@ def vectorize_color(color_masks, width, height, fmt="eps", title="Vector Illustr
             filtered.append(curve)
 
         if filtered:
-            colored_layers.append({"color": layer["color"], "curves": filtered})
+            # Cluster the curves so disconnected parts of the same color become separate layers
+            sub_clusters = _cluster([(c, min([p.x for p in [c.start_point] + [s.end_point for s in c]]), min([p.y for p in [c.start_point] + [s.end_point for s in c]]), max([p.x for p in [c.start_point] + [s.end_point for s in c]]), max([p.y for p in [c.start_point] + [s.end_point for s in c]])) for c in filtered], width, height)
+            for cluster in sub_clusters:
+                colored_layers.append({"color": layer["color"], "curves": cluster})
 
     if not colored_layers:
         return None
@@ -294,8 +297,8 @@ def _cluster(items, width, height):
     items: list of (curve, mn_x, mn_y, mx_x, mx_y)
     """
     n = len(items)
-    # Use a tighter margin for grid-based icon sheets (10px)
-    margin = 10
+    # Set margin to 0 so only overlapping shapes (like a shape and its hole) are grouped.
+    margin = 0
     parent = list(range(n))
 
     def find(x):
@@ -307,13 +310,16 @@ def _cluster(items, width, height):
     def union(a, b):
         parent[find(a)] = find(b)
 
+    def is_inside(ix0, iy0, ix1, iy1, ox0, oy0, ox1, oy1):
+        margin = 1  # small tolerance
+        return ix0 >= ox0 - margin and iy0 >= oy0 - margin and ix1 <= ox1 + margin and iy1 <= oy1 + margin
+
     for i in range(n):
         x0, y0, x1, y1 = items[i][1], items[i][2], items[i][3], items[i][4]
         for j in range(i + 1, n):
             ax0, ay0, ax1, ay1 = items[j][1], items[j][2], items[j][3], items[j][4]
-            # Check for overlap within margin
-            if not (x1 + margin < ax0 or ax1 + margin < x0 or
-                    y1 + margin < ay0 or ay1 + margin < y0):
+            # Only group if one bounding box is completely inside the other (e.g. a hole inside a parent shape)
+            if is_inside(x0, y0, x1, y1, ax0, ay0, ax1, ay1) or is_inside(ax0, ay0, ax1, ay1, x0, y0, x1, y1):
                 union(i, j)
 
     groups = {}
@@ -1900,21 +1906,7 @@ def vectorize_shutterstock(
     out_h = orig_h * scale
     W, H = int(round(out_w)), int(round(out_h))
 
-    if mode == "vision":
-        eps_final, jpg_bytes, png_bytes = vectorize_vision_ai(
-            image_bytes,
-            fmt="eps",
-            colormode="color",
-            hierarchical="stacked",
-            mode="spline",
-            title=title,
-            creator=creator,
-            description=description,
-            keywords=keywords,
-            return_previews=True
-        )
-        return eps_final, jpg_bytes, png_bytes, None
-    elif mode == "color":
+    if mode == "color" or mode == "vision":
         quantized_preview, (width, height), color_masks = process_color_image(image_bytes, num_colors=num_colors, skip_white=True)
         if not color_masks:
             quantized_preview, (width, height), color_masks = process_color_image(image_bytes, num_colors=num_colors, skip_white=False)

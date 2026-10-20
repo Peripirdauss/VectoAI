@@ -4,41 +4,67 @@ Welcome to **Vecto**, your professional-grade bulk vectorization tool. This guid
 
 ---
 
-## 1. Getting Started
+## 1. Starting and Stopping the Server
 
-To run Vecto on your local machine, you need to start both the Python backend and the React frontend.
+### Cara Cepat (Windows Batch Scripts):
+1. **Start Server**: Cukup double-click atau jalankan `run.bat` di root project.
+   - Script ini otomatis menjalankan backend (FastAPI pada port `8001`), frontend (Vite pada port `5174`), dan membuka browser secara otomatis.
+2. **Stop Server**: Double-click atau jalankan `stop.bat` di root project.
+   - Script ini otomatis mematikan semua process yang berjalan di port `8001` (backend) dan `5174` (frontend).
 
-**Step 1: Start the Backend (FastAPI)**
+### Cara Manual:
 
-*On macOS/Linux:*
-```bash
-cd /path/to/vecto
-PYTHONPATH=. ./backend/venv/bin/python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
-```
+**Backend (FastAPI):**
+* *Windows (PowerShell):*
+  ```powershell
+  $env:PYTHONPATH="."
+  .\backend\venv\Scripts\python -m uvicorn backend.main:app --host 127.0.0.1 --port 8001
+  ```
+* *macOS/Linux:*
+  ```bash
+  PYTHONPATH=. ./backend/venv/bin/python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8001
+  ```
 
-*On Windows (Command Prompt or PowerShell):*
-```powershell
-cd C:\path\to\vecto
-set PYTHONPATH=.
-.env:PYTHONPATH="."; .\backend\venv\Scripts\python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
-```
-
-*(Note: On Windows, make sure you have installed the necessary Python dependencies in your virtual environment by running `.\backend\venv\Scripts\pip install -r backend\requirements.txt` first).*
-
-**Step 2: Start the Frontend (React/Vite)**
-Open a new terminal window:
-
-*On macOS/Linux/Windows:*
-```bash
-cd path/to/vecto/frontend
-npm run dev
-```
-
-Open your browser to the URL provided by Vite (usually `http://localhost:5173`).
+**Frontend (React/Vite):**
+* Buka terminal baru:
+  ```bash
+  cd frontend
+  npm run dev
+  ```
+* Buka browser di `http://localhost:5174`.
 
 ---
 
-## 2. Using the Vecto Interface
+## 2. Cara Tunnelling (Akses dari Internet / Device Lain)
+
+Untuk mengakses VectoAI dari luar jaringan lokal atau sharing ke device lain:
+
+### Cara Praktis:
+Jalankan script `tunnel.bat` yang sudah disediakan di root folder:
+```cmd
+tunnel.bat
+```
+Pilih opsi:
+- **[1] localtunnel**: Menggunakan `npx localtunnel --port 5174`. Tidak butuh login, cepat.
+- **[2] cloudflared**: Menggunakan Cloudflare Tunnel (`cloudflared tunnel --url http://localhost:5174`). Sangat stabil dan tidak memerlukan konfigurasi tambahan.
+
+### Cara Manual via Terminal:
+- Menggunakan **Cloudflare Tunnel**:
+  ```bash
+  cloudflared tunnel --url http://localhost:5174
+  ```
+- Menggunakan **Localtunnel**:
+  ```bash
+  npx localtunnel --port 5174
+  ```
+- Menggunakan **Ngrok** (jika terinstall):
+  ```bash
+  ngrok http 5174
+  ```
+
+---
+
+## 3. Using the Vecto Interface
 
 1. **Upload Images**: Drag and drop your raster images (PNG, JPG, JPEG) into the upload area, or click to select files. Vecto supports both single files and bulk uploads (e.g., an entire folder of icons).
 2. **Preview Mode**: Click on any uploaded file in the list to see a live "selection mask". This mask shows exactly what the vectorizer sees.
@@ -48,7 +74,7 @@ Open your browser to the URL provided by Vite (usually `http://localhost:5173`).
 
 ---
 
-## 3. The "Invert Colors" Feature (Crucial)
+## 4. The "Invert Colors" Feature (Crucial)
 
 Vecto features a highly intelligent "Auto-Polarity Detection" engine. This means that 99% of the time, the tool automatically knows what the icon is and what the background is, regardless of whether your image is light-on-dark or dark-on-light.
 
@@ -59,7 +85,7 @@ However, sometimes you need manual control:
 
 ---
 
-## 4. Understanding the Exported Files
+## 5. Understanding the Exported Files
 
 Vecto outputs professional formats explicitly tailored for microstock and professional software (Adobe Illustrator, Affinity Designer).
 
@@ -70,7 +96,7 @@ Vecto outputs professional formats explicitly tailored for microstock and profes
 
 ---
 
-## 5. Submitting to Microstock Agencies
+## 6. Submitting to Microstock Agencies
 
 Vecto is tuned to comply with the stringent requirements of agencies like Shutterstock:
 
@@ -81,7 +107,7 @@ Vecto is tuned to comply with the stringent requirements of agencies like Shutte
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 * **Blank/Empty File in Illustrator**: If you uploaded a heavily compressed JPEG or an image with absolute zero mathematical contrast between background and foreground, adjust the `Threshold` slider inside the Vecto UI until you see crisp white shapes in the preview, then download again.
 * **Icons are "Holes" inside a Black Box**: You accidentally vectorized inverted contours. Go back, toggle the **Invert Colors** checkbox, and download again.

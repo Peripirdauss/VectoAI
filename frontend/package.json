@@ -10,7 +10,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@rolldown/binding-darwin-arm64": "^1.2.8",
     "axios": "^1.13.6",
     "jszip": "^3.10.1",
     "lucide-react": "^1.6.0",

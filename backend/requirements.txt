@@ -5,3 +5,11 @@ opencv-python-headless
 numpy
 potracer
 pycairo
+vtracer
+cairosvg
+Pillow
+beautifulsoup4
+svgelements
+pytoshop
+shapely
+rembg
