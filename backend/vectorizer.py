@@ -276,8 +276,8 @@ def vectorize_color(color_masks, width, height, fmt="eps", title="Vector Illustr
             filtered.append(curve)
 
         if filtered:
-            # Cluster the curves so disconnected parts of the same color become separate layers
-            sub_clusters = _cluster([(c, min([p.x for p in [c.start_point] + [s.end_point for s in c]]), min([p.y for p in [c.start_point] + [s.end_point for s in c]]), max([p.x for p in [c.start_point] + [s.end_point for s in c]]), max([p.y for p in [c.start_point] + [s.end_point for s in c]])) for c in filtered], width, height)
+            # Cluster the curves so disconnected parts of the same color become separate layers (keeping holes grouped)
+            sub_clusters = _cluster([(c, min([p.x for p in [c.start_point] + [s.end_point for s in c]]), min([p.y for p in [c.start_point] + [s.end_point for s in c]]), max([p.x for p in [c.start_point] + [s.end_point for s in c]]), max([p.y for p in [c.start_point] + [s.end_point for s in c]])) for c in filtered], width, height, inside_only=True)
             for cluster in sub_clusters:
                 colored_layers.append({"color": layer["color"], "curves": cluster})
 
@@ -291,14 +291,12 @@ def vectorize_color(color_masks, width, height, fmt="eps", title="Vector Illustr
         return inject_metadata_to_eps(eps_bytes, title=title, description=description, keywords=keywords)
 
 
-def _cluster(items, width, height):
+def _cluster(items, width, height, margin=15, inside_only=False):
     """
     Union-Find: group curves whose bounding boxes are near each other.
     items: list of (curve, mn_x, mn_y, mx_x, mx_y)
     """
     n = len(items)
-    # Set margin to 0 so only overlapping shapes (like a shape and its hole) are grouped.
-    margin = 0
     parent = list(range(n))
 
     def find(x):
@@ -311,16 +309,22 @@ def _cluster(items, width, height):
         parent[find(a)] = find(b)
 
     def is_inside(ix0, iy0, ix1, iy1, ox0, oy0, ox1, oy1):
-        margin = 1  # small tolerance
-        return ix0 >= ox0 - margin and iy0 >= oy0 - margin and ix1 <= ox1 + margin and iy1 <= oy1 + margin
+        m = 1  # small tolerance
+        return ix0 >= ox0 - m and iy0 >= oy0 - m and ix1 <= ox1 + m and iy1 <= oy1 + m
 
     for i in range(n):
         x0, y0, x1, y1 = items[i][1], items[i][2], items[i][3], items[i][4]
         for j in range(i + 1, n):
             ax0, ay0, ax1, ay1 = items[j][1], items[j][2], items[j][3], items[j][4]
-            # Only group if one bounding box is completely inside the other (e.g. a hole inside a parent shape)
-            if is_inside(x0, y0, x1, y1, ax0, ay0, ax1, ay1) or is_inside(ax0, ay0, ax1, ay1, x0, y0, x1, y1):
-                union(i, j)
+            if inside_only:
+                # Only group if one bounding box is completely inside the other (e.g. a hole inside a parent shape)
+                if is_inside(x0, y0, x1, y1, ax0, ay0, ax1, ay1) or is_inside(ax0, ay0, ax1, ay1, x0, y0, x1, y1):
+                    union(i, j)
+            else:
+                # Group curves that overlap or are close within margin (so multi-part icons stay in one piece)
+                if not (x1 + margin < ax0 or ax1 + margin < x0 or
+                        y1 + margin < ay0 or ay1 + margin < y0):
+                    union(i, j)
 
     groups = {}
     for i in range(n):
@@ -770,6 +774,85 @@ def split_grid_icons(icon_layers, title="Vector Illustration", creator="peripird
         })
 
     return split_results
+
+
+def slice_grid_icons(image_bytes: bytes, rows: int = 3, cols: int = 3, padding_ratio: float = 0.12) -> list:
+    """
+    Slices a grid collection sheet (e.g. 3x3, 2x2, 4x4) into individual centered icon images.
+    Returns a list of PNG byte buffers, one per icon tile.
+    """
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return []
+    H, W = img.shape[:2]
+
+    # Detect foreground mask
+    if len(img.shape) == 3 and img.shape[2] == 4 and np.min(img[:, :, 3]) < 255:
+        mask = img[:, :, 3] > 25
+    else:
+        gray = cv2.cvtColor(img[:, :, :3], cv2.COLOR_BGR2GRAY) if len(img.shape) >= 3 else img
+        if np.mean(gray) > 127:
+            _, mask = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+        else:
+            _, mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+
+    coords = cv2.findNonZero(mask.astype(np.uint8))
+    if coords is None:
+        return []
+    x, y, w, h = cv2.boundingRect(coords)
+
+    # If content already spans almost the entire canvas, use full canvas to preserve natural grid
+    if x <= W * 0.06 and y <= H * 0.06 and (x + w) >= W * 0.94 and (y + h) >= H * 0.94:
+        x, y, w, h = 0, 0, W, H
+
+    cell_w = w / cols
+    cell_h = h / rows
+
+    tiles = []
+    for r in range(rows):
+        for c in range(cols):
+            x0 = int(round(x + c * cell_w))
+            y0 = int(round(y + r * cell_h))
+            x1 = int(round(x + (c + 1) * cell_w))
+            y1 = int(round(y + (r + 1) * cell_h))
+
+            x0, y0 = max(0, x0), max(0, y0)
+            x1, y1 = min(W, x1), min(H, y1)
+
+            cell = img[y0:y1, x0:x1]
+            if cell.size == 0:
+                continue
+
+            cell_mask = mask[y0:y1, x0:x1]
+            cell_coords = cv2.findNonZero(cell_mask.astype(np.uint8))
+            if cell_coords is None:
+                continue
+
+            cx, cy, cw, ch = cv2.boundingRect(cell_coords)
+            if cw < 8 or ch < 8:
+                continue
+
+            icon_crop = cell[cy:cy+ch, cx:cx+cw]
+
+            # Make square canvas with padding
+            max_dim = max(cw, ch)
+            pad = max(10, int(max_dim * padding_ratio))
+            target_side = max_dim + 2 * pad
+
+            if len(img.shape) == 3 and img.shape[2] == 4:
+                canvas = np.zeros((target_side, target_side, 4), dtype=np.uint8)
+            else:
+                canvas = np.ones((target_side, target_side, 3), dtype=np.uint8) * 255
+
+            off_x = (target_side - cw) // 2
+            off_y = (target_side - ch) // 2
+            canvas[off_y:off_y+ch, off_x:off_x+cw] = icon_crop
+
+            _, buf = cv2.imencode('.png', canvas)
+            tiles.append(buf.tobytes())
+
+    return tiles
 
 
 

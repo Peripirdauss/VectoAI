@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Wand2, Download, RefreshCw, Image as ImageIcon, Settings, 
   ChevronDown, ChevronUp, AlertCircle, Check, Trash2, Archive, 
-  StopCircle, Sparkles, Crop, RotateCw, Sliders, ZoomIn, X, Maximize2
+  StopCircle, Sparkles, Crop, RotateCw, Sliders, ZoomIn, X
 } from 'lucide-react';
 import JSZip from 'jszip';
 
@@ -40,13 +40,15 @@ export const IconGenerator: React.FC = () => {
   const [removeBg, setRemoveBg] = useState<boolean>(false);
   const [antiAi, setAntiAi] = useState<boolean>(false);
   const [fakeMetadata, setFakeMetadata] = useState<boolean>(false);
+  const [concurrency, setConcurrency] = useState<number>(() => Number(localStorage.getItem('vecto_ai_icon_concurrency')) || 3);
 
   useEffect(() => {
     localStorage.setItem('vecto_ai_icon_key', apiKey);
     localStorage.setItem('vecto_ai_icon_base', baseUrl);
     localStorage.setItem('vecto_ai_icon_model', model);
     localStorage.setItem('vecto_ai_icon_size', size);
-  }, [apiKey, baseUrl, model, size]);
+    localStorage.setItem('vecto_ai_icon_concurrency', concurrency.toString());
+  }, [apiKey, baseUrl, model, size, concurrency]);
 
   // Sync customW & customH when size string changes
   useEffect(() => {
@@ -261,48 +263,63 @@ export const IconGenerator: React.FC = () => {
     setGlobalError(null);
     stopRequested.current = false;
 
-    const totalOps = promptList.length * imagesPerPrompt;
+    const tasks: { prompt: string; index: number }[] = [];
+    promptList.forEach((p) => {
+      for (let i = 0; i < imagesPerPrompt; i++) {
+        tasks.push({ prompt: p, index: tasks.length + 1 });
+      }
+    });
+
+    const totalOps = tasks.length;
     let completedOps = 0;
     let successCount = 0;
     let lastErrMsg = '';
+    const workerCount = Math.max(1, Math.min(concurrency, tasks.length));
 
-    showToast(`Memulai proses batch ${totalOps} gambar...`);
+    showToast(`Memulai batch ${totalOps} gambar (${workerCount} worker paralel)...`);
 
-    for (let pIdx = 0; pIdx < promptList.length; pIdx++) {
-      const currentP = promptList[pIdx];
+    let nextTaskIdx = 0;
 
-      for (let imgIdx = 0; imgIdx < imagesPerPrompt; imgIdx++) {
-        if (stopRequested.current) {
-          showToast('Proses batch dihentikan oleh pengguna.');
-          break;
-        }
+    const runWorker = async (workerId: number) => {
+      while (nextTaskIdx < tasks.length && !stopRequested.current) {
+        const task = tasks[nextTaskIdx++];
+        if (!task) break;
 
-        completedOps++;
         setCurrentProgress({
-          current: completedOps,
+          current: completedOps + 1,
           total: totalOps,
-          currentPrompt: `(${pIdx + 1}/${promptList.length}) ${currentP}`
+          currentPrompt: `[Worker ${workerId}] (${task.index}/${totalOps}) ${task.prompt}`
         });
 
         try {
-          const imgUrl = await generateSingleImage(currentP);
+          const imgUrl = await generateSingleImage(task.prompt);
+          if (stopRequested.current) break;
+
           const newIcon: GeneratedIcon = {
             id: `icon_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
             url: imgUrl,
-            prompt: currentP,
+            prompt: task.prompt,
             createdAt: Date.now()
           };
           setGeneratedImages(prev => [newIcon, ...prev]);
           successCount++;
         } catch (err: any) {
-          console.error(`Error on prompt "${currentP}":`, err);
+          console.error(`[Worker ${workerId}] Error on prompt "${task.prompt}":`, err);
           lastErrMsg = err.message || 'Error tidak diketahui';
           setGlobalError(`Gagal generate gambar: ${lastErrMsg}`);
+        } finally {
+          completedOps++;
+          setCurrentProgress({
+            current: completedOps,
+            total: totalOps,
+            currentPrompt: `Progres: ${completedOps}/${totalOps} gambar`
+          });
         }
       }
+    };
 
-      if (stopRequested.current) break;
-    }
+    const workers = Array.from({ length: workerCount }, (_, idx) => runWorker(idx + 1));
+    await Promise.all(workers);
 
     setIsGenerating(false);
     setCurrentProgress(null);
@@ -722,7 +739,7 @@ export const IconGenerator: React.FC = () => {
         </div>
 
         {/* Options Row */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 pt-2">
           <div>
             <label className="block text-xs font-semibold text-slate-400 mb-1.5">Preset Gaya Desain</label>
             <select
@@ -764,6 +781,31 @@ export const IconGenerator: React.FC = () => {
                 <option value="cinematic">🎬 Cinematic Dark</option>
                 <option value="flat">☁️ Flat Minimal</option>
               </select>
+            </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-semibold text-slate-400">Worker Paralel</label>
+              <span className="text-[10px] font-bold text-amber-400 font-mono">{concurrency} Worker</span>
+            </div>
+            <div className="grid grid-cols-4 gap-1">
+              {[1, 2, 3, 5].map((w) => (
+                <button
+                  key={w}
+                  type="button"
+                  disabled={isGenerating}
+                  onClick={() => setConcurrency(w)}
+                  className={`py-2 rounded-xl text-xs font-bold transition border ${
+                    concurrency === w
+                      ? 'bg-amber-500/20 border-amber-500 text-amber-300 shadow-sm shadow-amber-500/10'
+                      : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-white hover:bg-slate-700'
+                  }`}
+                  title={`${w} Worker bersamaan (${w === 3 ? 'Default Rekomendasi - Cepat & Aman' : w === 1 ? 'Sekuensial 1-per-1' : 'Multi-Worker Cepat'})`}
+                >
+                  {w}{w === 3 ? '⚡' : ''}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -812,7 +854,7 @@ export const IconGenerator: React.FC = () => {
               className="w-full h-[48px] bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-bold rounded-xl transition shadow-lg shadow-indigo-600/25 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
             >
               <Wand2 className="w-5 h-5" />
-              <span>Mulai Batch Generate ({promptCount * imagesPerPrompt} Gambar)</span>
+              <span>Mulai Batch Generate ({promptCount * imagesPerPrompt} Gambar • {concurrency} Worker)</span>
             </button>
           ) : (
             <button 
@@ -832,6 +874,9 @@ export const IconGenerator: React.FC = () => {
               <span className="text-blue-400 font-bold flex items-center gap-2">
                 <RefreshCw className="w-3.5 h-3.5 animate-spin" />
                 Sedang memproses {currentProgress.current} dari {currentProgress.total} gambar...
+                <span className="text-[10px] font-mono font-normal px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  {concurrency} Worker Aktif
+                </span>
               </span>
               <span className="text-slate-400 font-mono">
                 {Math.round((currentProgress.current / currentProgress.total) * 100)}%

@@ -21,7 +21,7 @@ from backend.vectorizer import (
     process_image, vectorize, process_color_image, vectorize_color,
     vectorize_vision_ai, sanitize_svg_for_microstock,
     vectorize_freepik, vectorize_adobe_stock, vectorize_vecteezy, vectorize_shutterstock, vectorize_shutterstock_pattern, preflight_check,
-    analyze_seamless_continuity, generate_3x3_tile_preview, vectorize_seamless_pattern_tiled
+    analyze_seamless_continuity, generate_3x3_tile_preview, vectorize_seamless_pattern_tiled, slice_grid_icons
 )
 from backend.duplicate_finder import find_duplicates_in_batch
 from backend.ftp_uploader import test_ftp_connection, upload_files_to_ftp
@@ -44,6 +44,19 @@ app.add_middleware(
 def str_to_bool(val) -> bool:
     if isinstance(val, bool): return val
     return str(val).lower() in ("true", "1", "yes")
+
+def parse_grid_layout(layout: str) -> tuple[int, int]:
+    layout = (layout or "3x3").strip().lower()
+    if layout == "2x2":
+        return 2, 2
+    elif layout == "4x4":
+        return 4, 4
+    elif layout == "3x4":
+        return 3, 4
+    elif layout == "4x3":
+        return 4, 3
+    else:
+        return 3, 3 # Default 3x3 collection sheet
 
 def sanitize_filename(filename: str) -> str:
     base_name = filename.rsplit('.', 1)[0]
@@ -355,11 +368,44 @@ async def bulk_vectorize_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_freepik_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, creator: str = "peripirdaus", split_grid: bool = False, title: str = "", description: str = "", keywords: str = ""):
+def _sync_freepik_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, creator: str = "peripirdaus", split_grid: bool = False, split_layout: str = "3x3", title: str = "", description: str = "", keywords: str = ""):
     def _proc_item(args):
         i, (orig_filename, contents) = args
         safe_name = sanitize_filename(orig_filename)
         eps_title = title or f"{safe_name}.eps"
+
+        if split_grid:
+            rows, cols = parse_grid_layout(split_layout)
+            tiles = slice_grid_icons(contents, rows=rows, cols=cols)
+            if len(tiles) > 1:
+                sub_entries = []
+                for sub_idx, sub_tile in enumerate(tiles):
+                    idx_str = f"icon_{sub_idx + 1}"
+                    sub_title = f"{safe_name}_{idx_str}"
+                    res1, res2, res3 = vectorize_freepik(
+                        sub_tile,
+                        threshold_val=threshold,
+                        invert=inv,
+                        mode=mode,
+                        num_colors=num_colors,
+                        title=sub_title,
+                        creator=creator,
+                        split_grid=False,
+                        description=description,
+                        keywords=keywords
+                    )
+                    if res1 is not None and res2 is not None:
+                        sub_entries.append({
+                            "eps_name": f"{safe_name}_{idx_str}.eps",
+                            "jpg_name": f"{safe_name}_{idx_str}.jpg",
+                            "png_name": f"{safe_name}_{idx_str}.png",
+                            "eps_b64": base64.b64encode(res1 if isinstance(res1, bytes) else res1.encode()).decode(),
+                            "jpg_b64": base64.b64encode(res2).decode(),
+                            "png_b64": base64.b64encode(res3).decode() if res3 else "",
+                        })
+                if sub_entries:
+                    return sub_entries
+
         res1, res2, res3 = vectorize_freepik(
             contents,
             threshold_val=threshold,
@@ -375,11 +421,11 @@ def _sync_freepik_batch(files_data: list, threshold: int, inv: bool, mode: str, 
         if res1 is None:
             return None
 
-        # Check if grid auto-splitter produced sub-items
+        # Check if legacy grid auto-splitter produced sub-items
         if res2 is True and isinstance(res1, list):
             sub_entries = []
             for sub in res1:
-                idx_str = f"sub_{sub['sub_index']}"
+                idx_str = f"icon_{sub['sub_index']}"
                 sub_entries.append({
                     "eps_name": f"{safe_name}_{idx_str}.eps",
                     "jpg_name": f"{safe_name}_{idx_str}.jpg",
@@ -423,6 +469,7 @@ async def freepik_vectorize_endpoint(
     numColors: int = Form(4),
     creator: str = Form("peripirdaus"),
     splitGrid: str = Form("false"),
+    splitLayout: str = Form("3x3"),
     title: str = Form(""),
     description: str = Form(""),
     keywords: str = Form("")
@@ -432,7 +479,7 @@ async def freepik_vectorize_endpoint(
         split_g = str_to_bool(splitGrid)
         files_data = [(f.filename, await f.read()) for f in files]
         
-        results = await asyncio.to_thread(_sync_freepik_batch, files_data, threshold, inv, mode, numColors, creator, split_g, title, description, keywords)
+        results = await asyncio.to_thread(_sync_freepik_batch, files_data, threshold, inv, mode, numColors, creator, split_g, splitLayout, title, description, keywords)
         if not results:
             raise HTTPException(status_code=400, detail="Tidak ada ikon yang terdeteksi untuk Freepik.")
 
@@ -509,11 +556,48 @@ async def shutterstock_vectorize_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_shutterstock_standard_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, creator: str = "peripirdaus", title: str = "", description: str = "", keywords: str = ""):
+def _sync_shutterstock_standard_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, creator: str = "peripirdaus", split_grid: bool = False, split_layout: str = "3x3", title: str = "", description: str = "", keywords: str = ""):
     def _proc_item(args):
         i, (orig_filename, contents) = args
         safe_name = sanitize_filename(orig_filename)
         eps_title = title or f"{safe_name}.eps"
+
+        if split_grid:
+            rows, cols = parse_grid_layout(split_layout)
+            tiles = slice_grid_icons(contents, rows=rows, cols=cols)
+            if len(tiles) > 1:
+                sub_entries = []
+                for sub_idx, sub_tile in enumerate(tiles):
+                    idx_str = f"icon_{sub_idx + 1}"
+                    sub_title = f"{safe_name}_{idx_str}"
+                    eps_data, jpg_data, png_data, psd_data = vectorize_shutterstock(
+                        sub_tile,
+                        threshold_val=threshold,
+                        invert=inv,
+                        mode=mode,
+                        num_colors=num_colors,
+                        title=sub_title,
+                        creator=creator,
+                        description=description,
+                        keywords=keywords
+                    )
+                    if eps_data is not None and jpg_data is not None:
+                        entry = {
+                            "eps_name": f"{safe_name}_{idx_str}.eps",
+                            "jpg_name": f"{safe_name}_{idx_str}.jpg",
+                            "eps_b64": base64.b64encode(eps_data if isinstance(eps_data, bytes) else eps_data.encode()).decode(),
+                            "jpg_b64": base64.b64encode(jpg_data).decode(),
+                        }
+                        if png_data:
+                            entry["png_name"] = f"{safe_name}_{idx_str}.png"
+                            entry["png_b64"] = base64.b64encode(png_data).decode()
+                        if psd_data:
+                            entry["psd_name"] = f"{safe_name}_{idx_str}.psd"
+                            entry["psd_b64"] = base64.b64encode(psd_data).decode()
+                        sub_entries.append(entry)
+                if sub_entries:
+                    return sub_entries
+
         eps_data, jpg_data, png_data, psd_data = vectorize_shutterstock(
             contents,
             threshold_val=threshold,
@@ -539,14 +623,20 @@ def _sync_shutterstock_standard_batch(files_data: list, threshold: int, inv: boo
             if psd_data:
                 item["psd_name"] = f"{item_name}.psd"
                 item["psd_b64"] = base64.b64encode(psd_data).decode()
-            return item
+            return [item]
         return None
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         items = list(enumerate(files_data))
         results_raw = executor.map(_proc_item, items)
 
-    results = [r for r in results_raw if r is not None]
+    results = []
+    for r in results_raw:
+        if r is not None:
+            if isinstance(r, list):
+                results.extend(r)
+            else:
+                results.append(r)
     return results
 
 
@@ -558,14 +648,17 @@ async def shutterstock_vectorize_standard_endpoint(
     mode: str = Form("monochrome"),
     numColors: int = Form(4),
     creator: str = Form("peripirdaus"),
+    splitGrid: str = Form("false"),
+    splitLayout: str = Form("3x3"),
     title: str = Form(""),
     description: str = Form(""),
     keywords: str = Form("")
 ):
     try:
         inv = str_to_bool(invert)
+        split_g = str_to_bool(splitGrid)
         files_data = [(f.filename, await f.read()) for f in files]
-        results = await asyncio.to_thread(_sync_shutterstock_standard_batch, files_data, threshold, inv, mode, numColors, creator, title, description, keywords)
+        results = await asyncio.to_thread(_sync_shutterstock_standard_batch, files_data, threshold, inv, mode, numColors, creator, split_g, splitLayout, title, description, keywords)
         if not results:
             raise HTTPException(status_code=400, detail="Tidak ada ikon / vektor yang terdeteksi untuk Shutterstock.")
 
@@ -750,10 +843,10 @@ async def adobe_stock_vectorize_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, format: str, alphamax: float, opttolerance: float, creator: str = "peripirdaus", title: str = "", description: str = "", keywords: str = ""):
+def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str, num_colors: int, format: str, alphamax: float, opttolerance: float, creator: str = "peripirdaus", split_grid: bool = False, split_layout: str = "3x3", title: str = "", description: str = "", keywords: str = ""):
     zip_buffer = io.BytesIO()
     ext = format.lower()
-    is_bulk = len(files_data) > 1
+    is_bulk = len(files_data) > 1 or split_grid
     
     if not is_bulk:
         orig_filename, contents = files_data[0]
@@ -777,6 +870,34 @@ def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str,
         def _proc_item(args):
             i, (orig_filename, contents) = args
             safe_name = sanitize_filename(orig_filename)
+
+            if split_grid:
+                rows, cols = parse_grid_layout(split_layout)
+                tiles = slice_grid_icons(contents, rows=rows, cols=cols)
+                if len(tiles) > 1:
+                    sub_res = []
+                    for sub_idx, sub_tile in enumerate(tiles):
+                        item_name = f"{safe_name}_icon_{sub_idx + 1}"
+                        eps_data, jpg_data = vectorize_vecteezy(
+                            sub_tile,
+                            threshold_val=threshold,
+                            invert=inv,
+                            mode=mode,
+                            num_colors=num_colors,
+                            fmt=ext,
+                            alphamax=alphamax,
+                            opttolerance=opttolerance,
+                            title=item_name,
+                            creator=creator,
+                            description=description,
+                            keywords=keywords
+                        )
+                        if eps_data is not None:
+                            eps_bytes = eps_data if isinstance(eps_data, bytes) else eps_data.encode()
+                            sub_res.append((f"{item_name}.{ext}", eps_bytes, f"{item_name}.jpg", jpg_data))
+                    if sub_res:
+                        return sub_res
+
             item_name = f"{safe_name}_{i+1}" if len(files_data) > 1 else safe_name
             eps_data, jpg_data = vectorize_vecteezy(
                 contents,
@@ -794,7 +915,7 @@ def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str,
             )
             if eps_data is not None:
                 eps_bytes = eps_data if isinstance(eps_data, bytes) else eps_data.encode()
-                return f"{item_name}.{ext}", eps_bytes, f"{item_name}.jpg", jpg_data
+                return [(f"{item_name}.{ext}", eps_bytes, f"{item_name}.jpg", jpg_data)]
             return None
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -803,13 +924,13 @@ def _sync_vecteezy_batch(files_data: list, threshold: int, inv: bool, mode: str,
 
         written_count = 0
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for res in results_raw:
-                if res is not None:
-                    eps_name, eps_bytes, jpg_name, jpg_bytes = res
-                    zip_file.writestr(eps_name, eps_bytes)
-                    if jpg_bytes is not None:
-                        zip_file.writestr(jpg_name, jpg_bytes)
-                    written_count += 1
+            for res_list in results_raw:
+                if res_list:
+                    for (eps_name, eps_bytes, jpg_name, jpg_bytes) in res_list:
+                        zip_file.writestr(eps_name, eps_bytes)
+                        if jpg_bytes is not None:
+                            zip_file.writestr(jpg_name, jpg_bytes)
+                        written_count += 1
 
         return zip_buffer.getvalue() if written_count > 0 else None, True
 
@@ -825,20 +946,23 @@ async def vecteezy_vectorize_endpoint(
     alphamax: float = Form(0.75),
     opttolerance: float = Form(0.20),
     creator: str = Form("peripirdaus"),
+    splitGrid: str = Form("false"),
+    splitLayout: str = Form("3x3"),
     title: str = Form(""),
     description: str = Form(""),
     keywords: str = Form("")
 ):
     try:
         inv = str_to_bool(invert)
+        split_g = str_to_bool(splitGrid)
         ext = format.lower()
         files_data = [(f.filename, await f.read()) for f in files]
         
-        result_data, is_zip = await asyncio.to_thread(_sync_vecteezy_batch, files_data, threshold, inv, mode, numColors, ext, alphamax, opttolerance, creator, title, description, keywords)
+        result_data, is_zip = await asyncio.to_thread(_sync_vecteezy_batch, files_data, threshold, inv, mode, numColors, ext, alphamax, opttolerance, creator, split_g, splitLayout, title, description, keywords)
         if not result_data:
             raise HTTPException(status_code=400, detail="Tidak ada ikon yang terdeteksi untuk Vecteezy.")
             
-        if len(files) == 1:
+        if len(files) == 1 and not split_g:
             eps_data, _ = result_data
             if not eps_data:
                 raise HTTPException(status_code=400, detail="Tidak ada ikon terdeteksi.")

@@ -311,6 +311,7 @@ function App() {
   const [fillHoles, setFillHoles] = useState(true);
   const [cornerSharpness, setCornerSharpness] = useState(0.75);
   const [splitGrid, setSplitGrid] = useState(false);
+  const [splitLayout, setSplitLayout] = useState<'3x3' | '2x2' | '4x4' | '3x4'>('3x3');
   const [includeEps, setIncludeEps] = useState(true);
   const [includeJpg, setIncludeJpg] = useState(true);
   const [includePng, setIncludePng] = useState(false);
@@ -1031,6 +1032,7 @@ function App() {
           formData.append('numColors', numColors.toString());
           formData.append('creator', creator);
           formData.append('splitGrid', splitGrid.toString());
+          formData.append('splitLayout', splitLayout);
           formData.append('title', itemTitle);
           formData.append('description', itemDesc);
           formData.append('keywords', itemKw);
@@ -1211,7 +1213,7 @@ function App() {
     setLoading(true);
     setError(null);
 
-    const isBulk = files.length > 1;
+    const isBulk = files.length > 1 || splitGrid;
 
     try {
       if (!isBulk) {
@@ -1225,6 +1227,7 @@ function App() {
         formData.append('numColors', numColors.toString());
         formData.append('alphamax', cornerSharpness.toString());
         formData.append('creator', creator);
+        formData.append('splitGrid', 'false');
         let singleTitle = files[0].title || metaTitle;
         if (!singleTitle && files[0].file.name) {
           singleTitle = sanitizeFilename(files[0].file.name).replace(/_/g, ' ');
@@ -1280,6 +1283,8 @@ function App() {
             formData.append('numColors', numColors.toString());
             formData.append('alphamax', cornerSharpness.toString());
             formData.append('creator', creator);
+            formData.append('splitGrid', splitGrid.toString());
+            formData.append('splitLayout', splitLayout);
             formData.append('title', itemTitle);
             formData.append('description', itemDesc);
             formData.append('keywords', itemKw);
@@ -1290,9 +1295,19 @@ function App() {
             });
 
             if (response.data) {
-              const safeName = sanitizeFilename(fItem.file.name);
-              const vecName = files.length > 1 ? `${safeName}_${i + 1}.${format}` : `${safeName}.${format}`;
-              zip.file(vecName, response.data);
+              if (splitGrid) {
+                const subZip = await JSZip.loadAsync(response.data);
+                for (const [filename, fileObj] of Object.entries(subZip.files)) {
+                  if (!fileObj.dir) {
+                    const content = await fileObj.async('uint8array');
+                    zip.file(filename, content);
+                  }
+                }
+              } else {
+                const safeName = sanitizeFilename(fItem.file.name);
+                const vecName = files.length > 1 ? `${safeName}_${i + 1}.${format}` : `${safeName}.${format}`;
+                zip.file(vecName, response.data);
+              }
               successCount++;
             }
           } catch (itemErr) {
@@ -1358,6 +1373,8 @@ function App() {
           formData.append('numColors', numColors.toString());
           formData.append('creator', creator);
           formData.append('dilationPx', dilationPx.toString());
+          formData.append('splitGrid', splitGrid.toString());
+          formData.append('splitLayout', splitLayout);
           formData.append('title', itemTitle);
           formData.append('description', itemDesc);
           formData.append('keywords', itemKw);
@@ -1471,6 +1488,8 @@ function App() {
           formData.append('mode', mode);
           formData.append('numColors', numColors.toString());
           formData.append('creator', creator);
+          formData.append('splitGrid', splitGrid.toString());
+          formData.append('splitLayout', splitLayout);
           formData.append('title', itemTitle);
           formData.append('description', itemDesc);
           formData.append('keywords', itemKw);
@@ -2234,18 +2253,42 @@ function App() {
 
                     {/* Feature Toggles */}
                     <div className="space-y-2">
-                      <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 cursor-pointer hover:border-slate-700 transition-all">
-                        <input 
-                          type="checkbox" 
-                          checked={splitGrid} 
-                          onChange={(e) => setSplitGrid(e.target.checked)}
-                          className="w-4 h-4 rounded accent-purple-500"
-                        />
-                        <div className="text-xs">
-                          <span className="font-semibold text-slate-200 block">Auto-Split Icon Grid Sheet</span>
-                          <span className="text-slate-500 text-[10px]">Memotong tiap ikon pada sheet jadi file individual</span>
-                        </div>
-                      </label>
+                      <div className="p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 hover:border-slate-700 transition-all space-y-2.5">
+                        <label className="flex items-center gap-3 cursor-pointer">
+                          <input 
+                            type="checkbox" 
+                            checked={splitGrid} 
+                            onChange={(e) => setSplitGrid(e.target.checked)}
+                            className="w-4 h-4 rounded accent-purple-500"
+                          />
+                          <div className="text-xs">
+                            <span className="font-semibold text-slate-200 block">Auto-Split Icon Collection (Grid Sheet)</span>
+                            <span className="text-slate-500 text-[10px]">Memotong sheet koleksi jadi file individual (1 ikon per file)</span>
+                          </div>
+                        </label>
+
+                        {splitGrid && (
+                          <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-xs">
+                            <span className="text-[11px] font-medium text-purple-300">Layout Grid:</span>
+                            <div className="flex items-center gap-1">
+                              {(['3x3', '2x2', '4x4', '3x4'] as const).map((fmt) => (
+                                <button
+                                  key={fmt}
+                                  type="button"
+                                  onClick={() => setSplitLayout(fmt)}
+                                  className={`px-2 py-1 rounded text-[11px] font-bold transition-all ${
+                                    splitLayout === fmt 
+                                      ? 'bg-purple-600 text-white shadow-sm shadow-purple-500/30' 
+                                      : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+                                  }`}
+                                >
+                                  {fmt} {fmt === '3x3' ? '(9)' : fmt === '2x2' ? '(4)' : fmt === '4x4' ? '(16)' : '(12)'}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
 
                       <label className="flex items-center gap-3 p-3 rounded-xl bg-slate-900/50 border border-slate-800/80 cursor-pointer hover:border-slate-700 transition-all">
                         <input 
@@ -3121,6 +3164,20 @@ function App() {
                             alt="Original Bitmap" 
                             className="w-full h-full object-contain pointer-events-none drop-shadow-xl" 
                           />
+                          {splitGrid && (
+                            <div className="absolute inset-0 pointer-events-none p-4 grid z-10" style={{
+                              gridTemplateColumns: `repeat(${splitLayout === '2x2' ? 2 : splitLayout === '4x4' ? 4 : splitLayout === '3x4' ? 4 : 3}, minmax(0, 1fr))`,
+                              gridTemplateRows: `repeat(${splitLayout === '2x2' ? 2 : splitLayout === '4x4' ? 4 : splitLayout === '3x4' ? 3 : 3}, minmax(0, 1fr))`
+                            }}>
+                              {Array.from({ length: splitLayout === '2x2' ? 4 : splitLayout === '4x4' ? 16 : splitLayout === '3x4' ? 12 : 9 }).map((_, idx) => (
+                                <div key={idx} className="border border-dashed border-purple-400/50 relative flex items-start justify-start p-1.5 bg-purple-500/[0.03]">
+                                  <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-950/85 text-purple-300 border border-purple-500/40 shadow">
+                                    Icon #{idx + 1}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
 
                         {/* Layer 2 (Right / Clipped): Vector Result */}
@@ -3242,6 +3299,20 @@ function App() {
                             onClick={() => setLightboxImg({ src: selectedFile.previewUrl, title: `Original Input: ${selectedFile.file.name}` })}
                             className="w-full h-full p-2 object-contain drop-shadow-2xl transition-transform duration-300 group-hover:scale-[1.02] cursor-pointer" 
                           />
+                          {splitGrid && (
+                            <div className="absolute inset-0 pointer-events-none p-4 grid z-20" style={{
+                              gridTemplateColumns: `repeat(${splitLayout === '2x2' ? 2 : splitLayout === '4x4' ? 4 : splitLayout === '3x4' ? 4 : 3}, minmax(0, 1fr))`,
+                              gridTemplateRows: `repeat(${splitLayout === '2x2' ? 2 : splitLayout === '4x4' ? 4 : splitLayout === '3x4' ? 3 : 3}, minmax(0, 1fr))`
+                            }}>
+                              {Array.from({ length: splitLayout === '2x2' ? 4 : splitLayout === '4x4' ? 16 : splitLayout === '3x4' ? 12 : 9 }).map((_, idx) => (
+                                <div key={idx} className="border border-dashed border-purple-400/60 relative flex items-start justify-start p-1.5 bg-purple-500/[0.04]">
+                                  <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-slate-950/90 text-purple-300 border border-purple-500/40 shadow">
+                                    Icon #{idx + 1}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
 
                         {/* Box 2: Vector Result / Selection Mask */}
